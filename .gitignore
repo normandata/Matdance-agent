@@ -1,0 +1,30 @@
+# Build outputs
+**/bin/
+**/obj/
+.build_verify/
+.matdance/
+browser_temp/
+artifacts/
+
+# Logs
+*.log
+matdance_error.log
+matdance_request.log
+
+
+# Agent runtime data (local state, memories, skills, sessions — should not be committed)
+agents/
+
+# Developer markdown files
+V1.1.20-Plan.md
+V1.1.20-Plan.zh-CN.md
+
+# Python runtime caches
+__pycache__/
+*.py[cod]
+
+# Editor/OS
+.vs/
+.vscode/
+.DS_Store
+Thumbs.db

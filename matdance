@@ -1,0 +1,129 @@
+#!/usr/bin/env sh
+set -eu
+
+script_path=$0
+case "$script_path" in
+  */*) ;;
+  *) script_path=$(command -v "$script_path") ;;
+esac
+
+case "$script_path" in
+  /*) ;;
+  *) script_path="$(pwd)/$script_path" ;;
+esac
+
+script_dir=$(CDPATH= cd "$(dirname "$script_path")" && pwd)
+configuration=${MATDANCE_SOURCE_CONFIGURATION:-Debug}
+dll_path="$script_dir/src/Matdance.Cli/bin/$configuration/net9.0/Matdance.Cli.dll"
+
+matdance_cmd=
+matdance_sub=
+matdance_third=
+matdance_skip_next=0
+for arg in "$@"; do
+  if [ "$matdance_skip_next" -eq 1 ]; then
+    matdance_skip_next=0
+    continue
+  fi
+  case "$arg" in
+    --agents-dir)
+      matdance_skip_next=1
+      continue
+      ;;
+    --agents-dir=*)
+      continue
+      ;;
+    -*)
+      continue
+      ;;
+  esac
+  if [ -z "$matdance_cmd" ]; then
+    matdance_cmd=$arg
+  elif [ -z "$matdance_sub" ]; then
+    matdance_sub=$arg
+  elif [ -z "$matdance_third" ]; then
+    matdance_third=$arg
+  fi
+done
+
+matdance_direct_dll=0
+if [ -f "$dll_path" ]; then
+  if [ "$matdance_cmd" = "stop-all" ]; then
+    matdance_direct_dll=1
+  elif [ "$matdance_cmd" = "web-ui" ]; then
+    case "$matdance_sub" in
+      stop|stop-all|status|supervise)
+        matdance_direct_dll=1
+        ;;
+      supervisor)
+        case "$matdance_third" in
+          status|disable)
+            matdance_direct_dll=1
+            ;;
+        esac
+        ;;
+    esac
+  fi
+fi
+
+if [ "$matdance_direct_dll" -eq 1 ]; then
+  exec dotnet "$dll_path" "$@"
+fi
+
+matdance_restore_after_success=1
+if [ "$matdance_cmd" = "stop-all" ]; then
+  matdance_restore_after_success=0
+elif [ "$matdance_cmd" = "web-ui" ]; then
+  case "$matdance_sub" in
+    start|restart|stop|stop-all|supervise)
+      matdance_restore_after_success=0
+      ;;
+    supervisor)
+      case "$matdance_third" in
+        enable|disable)
+          matdance_restore_after_success=0
+          ;;
+      esac
+      ;;
+  esac
+fi
+
+matdance_was_running=0
+matdance_restore_host=
+matdance_restore_port=
+if [ -f "$dll_path" ]; then
+  matdance_status=$(dotnet "$dll_path" web-ui status 2>/dev/null || true)
+  matdance_url=$(printf '%s\n' "$matdance_status" | sed -n 's/.*running at \(http:\/\/[^[:space:]]*\).*/\1/p' | head -n 1)
+  if [ -n "$matdance_url" ]; then
+    matdance_host_port=${matdance_url#http://}
+    matdance_restore_host=${matdance_host_port%:*}
+    matdance_restore_host=${matdance_restore_host#[}
+    matdance_restore_host=${matdance_restore_host%]}
+    matdance_restore_port=${matdance_host_port##*:}
+    if [ -n "$matdance_restore_host" ] && [ -n "$matdance_restore_port" ]; then
+      dotnet "$dll_path" web-ui stop >/dev/null 2>&1 || true
+      matdance_was_running=1
+    fi
+  fi
+fi
+
+restore_matdance_web_ui() {
+  if [ "$matdance_was_running" -eq 1 ]; then
+    dotnet "$dll_path" web-ui start --mode preserve --host "$matdance_restore_host" --port "$matdance_restore_port" >/dev/null 2>&1 || true
+    matdance_was_running=0
+  fi
+}
+
+trap 'code=$?; restore_matdance_web_ui; exit $code' HUP INT TERM
+
+set +e
+dotnet run -c "$configuration" --project "$script_dir/src/Matdance.Cli/Matdance.Cli.csproj" -- "$@"
+matdance_exit=$?
+set -e
+
+if [ "$matdance_exit" -eq 0 ] && [ "$matdance_restore_after_success" -eq 0 ]; then
+  matdance_was_running=0
+fi
+restore_matdance_web_ui
+trap - HUP INT TERM
+exit "$matdance_exit"
