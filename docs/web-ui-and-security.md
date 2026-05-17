@@ -14,8 +14,8 @@ The default Web UI should bind only to loopback addresses:
 
 Non-loopback binding is refused unless you explicitly set:
 
-```text
-MATDANCE_ALLOW_REMOTE_WEB=1
+```bash
+export MATDANCE_ALLOW_REMOTE_WEB=1
 ```
 
 ## Remote Authentication

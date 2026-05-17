@@ -204,8 +204,17 @@ public sealed class WebUiProcessManager
 
         string fileName;
         string arguments;
-        fileName = "dotnet";
-        arguments = $"{Quote(dllPath)} {args}";
+        var processPath = Environment.ProcessPath;
+        if (!DotnetHostResolver.LooksLikeDotnetHost(processPath) && !string.IsNullOrWhiteSpace(processPath) && File.Exists(processPath))
+        {
+            fileName = processPath;
+            arguments = args;
+        }
+        else
+        {
+            fileName = DotnetHostResolver.ResolveDotnetHostPath();
+            arguments = $"{Quote(dllPath)} {args}";
+        }
 
         var psi = new ProcessStartInfo
         {
@@ -306,10 +315,14 @@ public sealed class WebUiProcessManager
         var driverRoot = Path.Combine(MatdanceRuntime.DependenciesRoot, "playwright-driver");
         var targetDriver = Path.Combine(driverRoot, ".playwright");
         if (Directory.Exists(targetDriver))
+        {
+            UnixExecutablePermissions.EnsurePlaywrightDriverExecutables(targetDriver);
             return driverRoot;
+        }
 
         Directory.CreateDirectory(driverRoot);
         CopyDirectoryForShadowRun(sourceDriver, targetDriver);
+        UnixExecutablePermissions.EnsurePlaywrightDriverExecutables(targetDriver);
         return driverRoot;
     }
 

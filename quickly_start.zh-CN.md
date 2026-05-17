@@ -177,6 +177,10 @@ macOS / Linux：
 
 当前浏览器依赖使用 Playwright `1.59.0`。依赖会安装到程序根目录下的 `.matdance/deps/playwright-browsers`，不会塞到用户 profile 里让你到处猜。
 
+macOS 上如果旧版本安装时看起来一直停在 `0%`，通常是 Playwright 用回车刷新同一行进度，而旧日志读取方式没有持续打印这些刷新。新版本会正常输出这类进度更新。若几分钟仍没有任何变化，先在 `--source cn` 和 `--source global` 之间切换；必要时删除未完成的 `.matdance/deps/playwright-browsers` 后重试。从压缩包解压后如果 `./matdance` 无法执行，先运行 `chmod +x ./matdance`；如果 macOS 隔离标记导致无权限或无法打开，在确认来源可信后可对 Matdance 目录执行 `xattr -dr com.apple.quarantine <Matdance目录>`。
+
+Apple Silicon 建议安装 arm64 版 .NET 9。若在 Rosetta 下运行 x64 的 `dotnet`，Matdance 会跟随进程架构使用 x64 Playwright Node，通常能跑，但不是首选路径。
+
 需要注意，“运行时根目录”不是永远等于程序输出目录。源码包装脚本会从仓库根目录运行，通常使用仓库根目录下的 `.matdance/`；发布包或从别的工作目录直接运行 DLL 时，会按当前项目/agents/程序根目录重新推导。`.matdance/` 里会放依赖、Playwright 浏览器、Playwright 驱动缓存、Web UI 状态、Web 鉴权 token、用户时区状态、注册入口脚本和 Web UI 影子运行目录。
 
 浏览器自动化工具链里现在有三类 cookie 工具：`save_cookie`、`list_cookie_by_site`、`apply_cookie`。默认行为都是全量保存或全量应用；可选的 `site` 参数只用于过滤主域分组。分组会把子域折到主域下面，比如 `mail.example.com` 和 `example.com` 都归到 `example.com`。cookie 保存到当前 agent 的 `agents/<agent>/runtime/browser_cookies/cookies.json`，`savedAt` 会按 Matdance 用户时区写入；cookie 自身的 `expires` 仍是浏览器标准 epoch 秒。这个文件属于敏感运行时状态，不要提交、不要拿去预览。
@@ -271,6 +275,13 @@ PowerShell 远程暴露示例：
 ```powershell
 $env:MATDANCE_ALLOW_REMOTE_WEB = "1"
 $env:MATDANCE_WEB_TOKEN = "replace-with-one-long-random-token"
+matdance web-ui start --host 0.0.0.0 --port 8765
+```
+
+macOS / Linux bash/zsh 远程暴露示例：
+```bash
+export MATDANCE_ALLOW_REMOTE_WEB=1
+export MATDANCE_WEB_TOKEN="replace-with-one-long-random-token"
 matdance web-ui start --host 0.0.0.0 --port 8765
 ```
 

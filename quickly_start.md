@@ -150,6 +150,10 @@ Windows:
 
 Browser dependencies are stored under `.matdance/deps/playwright-browsers` relative to the runtime root. They are not scattered into user profile paths.
 
+On macOS, older builds could look stuck at `0%` because Playwright rewrites progress on the same terminal line with carriage returns, and the old log reader did not print those updates. Current builds print those progress refreshes. If there is still no movement for several minutes, switch between `--source cn` and `--source global`; if needed, remove the incomplete `.matdance/deps/playwright-browsers` directory and retry. If an unpacked download cannot execute `./matdance`, run `chmod +x ./matdance`; if macOS quarantine blocks the folder, confirm the source first, then run `xattr -dr com.apple.quarantine <Matdance-folder>`.
+
+On Apple Silicon, prefer arm64 .NET 9. If you run x64 `dotnet` through Rosetta, Matdance follows the process architecture and uses the x64 Playwright Node runtime; it usually works, but it is not the preferred deployment path.
+
 ## Register the `matdance` Entry
 
 Windows PowerShell:
@@ -243,9 +247,19 @@ By default, the Web UI should bind only to local loopback hosts: `localhost`, `1
 
 If you intentionally bind to `0.0.0.0`, LAN IPs, or other non-loopback hosts, set:
 
+Windows PowerShell:
+
 ```powershell
 $env:MATDANCE_ALLOW_REMOTE_WEB = "1"
 $env:MATDANCE_WEB_TOKEN = "replace-with-one-long-random-token"
+matdance web-ui start --host 0.0.0.0 --port 8765
+```
+
+macOS / Linux bash/zsh:
+
+```bash
+export MATDANCE_ALLOW_REMOTE_WEB=1
+export MATDANCE_WEB_TOKEN="replace-with-one-long-random-token"
 matdance web-ui start --host 0.0.0.0 --port 8765
 ```
 

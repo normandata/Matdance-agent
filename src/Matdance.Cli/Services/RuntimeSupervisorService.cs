@@ -350,15 +350,14 @@ public sealed class RuntimeSupervisorService
     {
         var dllPath = Path.Combine(AppContext.BaseDirectory, "Matdance.Cli.dll");
         var processPath = Environment.ProcessPath;
-        var isDotnetHost = !string.IsNullOrWhiteSpace(processPath)
-            && Path.GetFileNameWithoutExtension(processPath).Equals("dotnet", StringComparison.OrdinalIgnoreCase);
+        var isDotnetHost = DotnetHostResolver.LooksLikeDotnetHost(processPath);
 
         var parts = new List<string>();
         if (!isDotnetHost && !string.IsNullOrWhiteSpace(processPath) && File.Exists(processPath))
             parts.Add(processPath);
         else
         {
-            parts.Add("dotnet");
+            parts.Add(DotnetHostResolver.ResolveDotnetHostPath());
             parts.Add(dllPath);
         }
 

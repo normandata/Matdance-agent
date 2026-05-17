@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace Matdance.Cli.Services;
 
@@ -85,7 +86,7 @@ public sealed class DependencyInstallerService
         if (!File.Exists(node))
             throw new InvalidOperationException("Playwright bundled Node runtime not found for " + MatdanceRuntime.OsName + " " + MatdanceRuntime.Architecture + ".");
 
-        EnsureExecutable(node, log);
+        UnixExecutablePermissions.EnsurePlaywrightDriverExecutables(driverRoot, log);
 
         if (source == DependencySource.Cn)
         {
@@ -158,52 +159,66 @@ public sealed class DependencyInstallerService
         return Path.Combine(nodeRoot, platform, fileName);
     }
 
-    private static void EnsureExecutable(string path, Action<string>? log)
-    {
-        if (OperatingSystem.IsWindows())
-            return;
-
-        try
-        {
-            var psi = new ProcessStartInfo
-            {
-                FileName = "chmod",
-                Arguments = "+x " + Quote(path),
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-            using var proc = Process.Start(psi);
-            proc?.WaitForExit(5000);
-        }
-        catch (Exception ex)
-        {
-            log?.Invoke("chmod failed, continuing: " + ex.Message);
-        }
-    }
-
     private static async Task<int> RunProcessAsync(ProcessStartInfo psi, Action<string>? log, CancellationToken ct)
     {
         using var proc = new Process { StartInfo = psi, EnableRaisingEvents = true };
-        proc.OutputDataReceived += (_, e) => { if (!string.IsNullOrWhiteSpace(e.Data)) log?.Invoke(e.Data); };
-        proc.ErrorDataReceived += (_, e) => { if (!string.IsNullOrWhiteSpace(e.Data)) log?.Invoke(e.Data); };
 
         if (!proc.Start())
             throw new InvalidOperationException("Failed to start dependency installer.");
 
-        proc.BeginOutputReadLine();
-        proc.BeginErrorReadLine();
+        var outputTask = PumpProcessOutputAsync(proc.StandardOutput, log, ct);
+        var errorTask = PumpProcessOutputAsync(proc.StandardError, log, ct);
         try
         {
             await proc.WaitForExitAsync(ct);
+            await Task.WhenAll(outputTask, errorTask);
             return proc.ExitCode;
         }
         catch (OperationCanceledException)
         {
             try { proc.Kill(entireProcessTree: true); } catch { }
+            try { await Task.WhenAll(outputTask, errorTask); } catch { }
             throw;
         }
+    }
+
+    private static async Task PumpProcessOutputAsync(StreamReader reader, Action<string>? log, CancellationToken ct)
+    {
+        var readBuffer = new char[1024];
+        var pending = new StringBuilder();
+        string? lastEmitted = null;
+
+        while (true)
+        {
+            var read = await reader.ReadAsync(readBuffer.AsMemory(0, readBuffer.Length), ct);
+            if (read == 0)
+                break;
+
+            for (var i = 0; i < read; i++)
+            {
+                var ch = readBuffer[i];
+                if (ch == '\r' || ch == '\n')
+                {
+                    EmitProcessOutput(pending, log, ref lastEmitted);
+                    pending.Clear();
+                    continue;
+                }
+
+                pending.Append(ch);
+            }
+        }
+
+        EmitProcessOutput(pending, log, ref lastEmitted);
+    }
+
+    private static void EmitProcessOutput(StringBuilder pending, Action<string>? log, ref string? lastEmitted)
+    {
+        var text = pending.ToString().TrimEnd();
+        if (string.IsNullOrWhiteSpace(text) || string.Equals(text, lastEmitted, StringComparison.Ordinal))
+            return;
+
+        lastEmitted = text;
+        log?.Invoke(text);
     }
 
     private static string Quote(string value) => "\"" + value.Replace("\"", "\\\"") + "\"";

@@ -20,7 +20,7 @@ Web UI 是 Matdance 的主入口。聊天、配置、记忆、技能、定时任
 默认 Web UI 只应绑定本机 loopback 地址。非 loopback host 会被拒绝，除非显式设置：
 
 ```bash
-MATDANCE_ALLOW_REMOTE_WEB=1
+export MATDANCE_ALLOW_REMOTE_WEB=1
 ```
 
 远程绑定会启用单 token 鉴权。浏览器登录通过 HttpOnly cookie 保存认证态；系统 API 也接受 `Authorization: Bearer <token>` 或 `X-Matdance-Token`。如果没有设置 `MATDANCE_WEB_TOKEN`，Matdance 会生成 token 并保存到 `.matdance/state/web-auth.json`。
