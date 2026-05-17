@@ -10686,7 +10686,7 @@ public static class WebPage
       renderSoundCueSettings();
     });
     $('soundCueUploadInput')?.addEventListener('change', function(event) {
-      const files = event.target.files || [];
+      const files = Array.from(event.target.files || []);
       event.target.value = '';
       uploadSoundCueFiles(files).catch(function(err) { $('hint').textContent = t('soundCueUploadFailedPrefix') + ': ' + (err.message || String(err)); });
     });
