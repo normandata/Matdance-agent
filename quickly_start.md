@@ -2,7 +2,7 @@
 
 Language: English | [中文](quickly_start.zh-CN.md)
 
-Current version: v1.1.19
+Current version: v1.1.20-preview
 
 This file only covers startup, dependencies, entry registration, and configuration. `README.md` explains what Matdance is, and [FULL-DOC.md](FULL-DOC.md) explains the system in depth.
 
@@ -245,23 +245,27 @@ Runtime modes:
 
 By default, the Web UI should bind only to local loopback hosts: `localhost`, `127.0.0.1`, or `::1`.
 
-If you intentionally bind to `0.0.0.0`, LAN IPs, or other non-loopback hosts, set:
+If you intentionally bind to `0.0.0.0`, LAN IPs, or other non-loopback hosts, prefer `web-ui start --public`. It binds `0.0.0.0`, enables single-token authentication, creates or reuses `.matdance/state/web-auth.json`, and prints the token path and current token in the console. You may set `MATDANCE_WEB_TOKEN` first if you want to provide your own long random token.
+
+The interactive wrapper exposes the same flow under `Web UI / Runtime supervisor` -> `Public Web UI / Remote access`. That submenu mirrors the local Web UI actions, but uses the public binding and prints the token information for public starts and supervisor setup.
 
 Windows PowerShell:
 
 ```powershell
-$env:MATDANCE_ALLOW_REMOTE_WEB = "1"
 $env:MATDANCE_WEB_TOKEN = "replace-with-one-long-random-token"
-matdance web-ui start --host 0.0.0.0 --port 8765
+matdance web-ui start --public --port 8765
 ```
 
 macOS / Linux bash/zsh:
 
 ```bash
-export MATDANCE_ALLOW_REMOTE_WEB=1
 export MATDANCE_WEB_TOKEN="replace-with-one-long-random-token"
-matdance web-ui start --host 0.0.0.0 --port 8765
+matdance web-ui start --public --port 8765
 ```
+
+If you need a specific LAN IP, `--host <ip>` still works and follows the remote-auth path. The lower-level `web --host 0.0.0.0` command still requires `MATDANCE_ALLOW_REMOTE_WEB=1`; normal use should go through `web-ui`.
+
+Switching back to loopback (`localhost`, `127.0.0.1`, or `::1`) disables Web UI token auth for that local binding even if the public token file still exists.
 
 Remote binding enables single-token authentication. Browser login writes an HttpOnly cookie. API clients may use:
 
@@ -305,7 +309,7 @@ Settings can configure multiple image generation profiles and multiple TTS profi
 
 Supported paths:
 
-- `image_generation`: calls `/images/generations`, stores images under `workspace/generated/images/`.
+- `image_generation`: starts an asynchronous host-managed `/images/generations` job in main chat, stores images under `workspace/generated/images/`, and reports authoritative status, fallback, errors, and output paths through `image_generation_show_process`. Ordinary scheduled-task subagents run it synchronously so the task receives final files or failure details before finishing. Use shared `batch_id` values for related images, cancel queued/running jobs before replacing changed requests, and keep prompts concise: normally 1-30 characters, 31-50 only when needed.
 - `text_to_speech`: calls native `/audio/speech`, `/tts`, DashScope, or chat-compatible audio endpoints, stores audio under `workspace/generated/audio/`.
 - `speech_to_text`: Chat/Lab browser recording currently uses browser Web Speech; STT tool work is tracked in the v1.1.20 plan.
 

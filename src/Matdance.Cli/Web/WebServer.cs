@@ -13,6 +13,8 @@ using Matdance.Plugins.Browser;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Matdance.Cli.Web;
 
@@ -22,15 +24,16 @@ public sealed class WebServer
     private static readonly string[] IconExtensions = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".bmp", ".ico"};
     private static readonly string[] SoundCueExtensions = {".mp3", ".wav", ".ogg", ".oga", ".opus", ".m4a", ".aac", ".flac", ".webm"};
     private static readonly string[] ChatImageAttachmentExtensions = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"};
-    private static readonly string[] ChatDocumentAttachmentExtensions = {".txt", ".md", ".markdown", ".pdf", ".doc", ".docx", ".rtf", ".csv", ".json", ".xml", ".yaml", ".yml", ".toml", ".xls", ".xlsx", ".ppt", ".pptx"};
-    private static readonly string[] ChatArchiveAttachmentExtensions = {".zip"};
+    private static readonly string[] ChatDocumentAttachmentExtensions = {".txt", ".md", ".markdown", ".log", ".ini", ".html", ".htm", ".css", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".py", ".ps1", ".sh", ".bat", ".cmd", ".sql", ".pdf", ".doc", ".docx", ".docm", ".odt", ".rtf", ".csv", ".tsv", ".json", ".xml", ".yaml", ".yml", ".toml", ".xls", ".xlsx", ".xlsm", ".xlsb", ".ods", ".ppt", ".pptx", ".pptm", ".odp", ".pages", ".numbers"};
+    private static readonly string[] ChatArchiveAttachmentExtensions = {".zip", ".rar", ".7z", ".tar", ".gz", ".tgz", ".bz2", ".xz"};
     private static readonly Regex SoundCueMarkerRegex = new(@"\{play[_-]?audio\s*[:：]\s*([^}]+)\}", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private const long MaxSoundCueUploadBytes = 8L * 1024 * 1024;
     private const long MaxSkillImportUploadBytes = 64L * 1024 * 1024;
     private const long MaxSkillImportExtractBytes = 64L * 1024 * 1024;
     private const int MaxSkillImportExtractFiles = 250;
-    private const int MaxChatAttachments = 3;
-    private const long MaxChatAttachmentBytes = 24L * 1024 * 1024;
+    private const int MaxChatAttachments = 10;
+    private const long MaxChatAttachmentBytes = 128L * 1024 * 1024;
+    private const long MaxChatAttachmentTotalBytes = 512L * 1024 * 1024;
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _sessionLocks = new();
     private readonly AgentActivityService _activity = new();
     private readonly BackgroundTaskQueue _backgroundQueue = new();
@@ -58,6 +61,16 @@ public sealed class WebServer
             ContentRootPath = Directory.GetCurrentDirectory()
         });
 
+        builder.Services.Configure<FormOptions>(options =>
+        {
+            options.MultipartBodyLengthLimit = MaxChatAttachmentTotalBytes + 1024L * 1024;
+            options.ValueLengthLimit = 4 * 1024 * 1024;
+            options.MultipartHeadersLengthLimit = 64 * 1024;
+        });
+        builder.WebHost.ConfigureKestrel(options =>
+        {
+            options.Limits.MaxRequestBodySize = MaxChatAttachmentTotalBytes + 1024L * 1024;
+        });
         builder.WebHost.UseUrls($"http://{_host}:{_port}");
         var app = builder.Build();
         var auth = WebAuthService.LoadOrCreate(_host);
@@ -136,7 +149,7 @@ public sealed class WebServer
         {
             backend = true,
             browser = _browser.IsRunning,
-            browserDependencies = new DependencyInstallerService().HasPlaywrightChromium(),
+            browserDependencies = _browser.IsRunning || new DependencyInstallerService().HasPlaywrightChromium(),
             os = MatdanceRuntime.OsName,
             shell = MatdanceRuntime.ShellInvocation,
             timeZone = UserTimeZoneService.GetSnapshot(),
@@ -860,17 +873,20 @@ public sealed class WebServer
         await app.StartAsync(ct);
         Console.WriteLine("[web] Backend started.");
 
-        // Pre-warm browser after the backend is already listening, so the UI can report startup state.
-        try
+        // Pre-warm after the backend is listening without blocking Web UI startup.
+        _ = Task.Run(async () =>
         {
-            Console.WriteLine("[web] Pre-warming browser...");
-            await _browser.EnsureBrowserAsync(headless: true);
-            Console.WriteLine("[web] Browser pre-warmed and ready.");
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[web] Browser pre-warm failed: {ex.Message}");
-        }
+            try
+            {
+                Console.WriteLine("[web] Pre-warming browser...");
+                await _browser.EnsureBrowserAsync(headless: true);
+                Console.WriteLine("[web] Browser pre-warmed and ready.");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[web] Browser pre-warm failed: {ex.Message}");
+            }
+        }, CancellationToken.None);
 
         Console.WriteLine("[web] Press Ctrl+C to stop.");
         try
@@ -955,13 +971,32 @@ public sealed class WebServer
   <main>
     <img class="login-logo" src="/assets/brand/matdance-logo.png" alt="Matdance">
     <form id="loginForm">
-      <p>Enter the single access token for this Matdance service.</p>
-      <label>Access token<input id="token" type="password" autocomplete="current-password" autofocus></label>
-      <button type="submit">Sign in</button>
+      <p id="intro">Enter the single access token for this Matdance service.</p>
+      <label><span id="tokenLabel">Access token</span><input id="token" type="password" autocomplete="current-password" autofocus></label>
+      <button id="submitButton" type="submit">Sign in</button>
       <div id="error" class="error"></div>
     </form>
   </main>
   <script>
+    const zh = (navigator.language || '').toLowerCase().startsWith('zh');
+    const text = zh ? {
+      title: 'Matdance 登录',
+      intro: '请输入此 Matdance 服务的单次访问 token。',
+      tokenLabel: '访问 token',
+      submit: '登录',
+      invalid: 'Token 无效。'
+    } : {
+      title: 'Matdance Login',
+      intro: 'Enter the single access token for this Matdance service.',
+      tokenLabel: 'Access token',
+      submit: 'Sign in',
+      invalid: 'Invalid token.'
+    };
+    document.documentElement.lang = zh ? 'zh-CN' : 'en';
+    document.title = text.title;
+    document.getElementById('intro').textContent = text.intro;
+    document.getElementById('tokenLabel').textContent = text.tokenLabel;
+    document.getElementById('submitButton').textContent = text.submit;
     document.getElementById('loginForm').addEventListener('submit', async function(event) {
       event.preventDefault();
       const error = document.getElementById('error');
@@ -973,7 +1008,7 @@ public sealed class WebServer
         body: JSON.stringify({ token })
       });
       if (!response.ok) {
-        error.textContent = 'Invalid token.';
+        error.textContent = text.invalid;
         return;
       }
       location.replace('/');
@@ -2041,7 +2076,7 @@ public sealed class WebServer
             session = SessionDto(data),
             messages = state.Messages.Select(MessageDto).ToList(),
             activeTask = state.ActiveTask,
-            tracedFiles = state.TracedFiles.Select(file => new { file.Path, length = file.Content.Length, file.LastRead }).ToList()
+            tracedFiles = state.TracedFiles.Select(file => new { file.Id, file.Kind, file.Mode, file.Path, length = file.Content.Length, file.LastRead, file.Status }).ToList()
         };
     }
 
@@ -2062,7 +2097,7 @@ public sealed class WebServer
             return;
         }
 
-        if (request == null || string.IsNullOrWhiteSpace(request.Agent) || string.IsNullOrWhiteSpace(request.Session) || (string.IsNullOrWhiteSpace(request.Message) && request.UploadFiles.Count == 0))
+        if (request == null || string.IsNullOrWhiteSpace(request.Agent) || string.IsNullOrWhiteSpace(request.Session) || (!request.ContinueFromHostNotice && string.IsNullOrWhiteSpace(request.Message) && request.UploadFiles.Count == 0))
         {
             await WriteEventAsync(context, "error", new { message = "Missing agent, session or message." });
             return;
@@ -2088,12 +2123,16 @@ public sealed class WebServer
         var key = $"{request.Agent}\u001f{request.Session}";
         var gate = _sessionLocks.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
         await gate.WaitAsync(context.RequestAborted);
+        IDisposable? hostNoticeLease = null;
         try
         {
+            hostNoticeLease = SessionHostNoticeHub.BeginActive(request.Agent, request.Session);
             await ProcessChatAsync(context, request);
         }
         finally
         {
+            hostNoticeLease?.Dispose();
+            PersistQueuedHostImageNotices(request.Agent, request.Session);
             gate.Release();
         }
     }
@@ -2102,7 +2141,20 @@ public sealed class WebServer
     {
         if (context.Request.HasFormContentType)
         {
-            var form = await context.Request.ReadFormAsync(context.RequestAborted);
+            IFormCollection form;
+            try
+            {
+                form = await context.Request.ReadFormAsync(context.RequestAborted);
+            }
+            catch (BadHttpRequestException ex)
+            {
+                throw new InvalidOperationException($"Attachment upload is too large or malformed. Up to {MaxChatAttachments} files, {FormatBytes(MaxChatAttachmentBytes)} each, {FormatBytes(MaxChatAttachmentTotalBytes)} total are allowed. {ex.Message}");
+            }
+            catch (System.IO.InvalidDataException ex)
+            {
+                throw new InvalidOperationException($"Attachment upload is too large or malformed. Up to {MaxChatAttachments} files, {FormatBytes(MaxChatAttachmentBytes)} each, {FormatBytes(MaxChatAttachmentTotalBytes)} total are allowed. {ex.Message}");
+            }
+
             var request = new ChatRequest
             {
                 Agent = FormValue(form, "agent") ?? string.Empty,
@@ -2111,10 +2163,7 @@ public sealed class WebServer
                 UploadFiles = form.Files.ToList()
             };
 
-            if (request.UploadFiles.Count > MaxChatAttachments)
-            {
-                throw new InvalidOperationException($"At most {MaxChatAttachments} attachments are allowed.");
-            }
+            ValidateChatAttachmentLimits(request.UploadFiles);
 
             return request;
         }
@@ -2126,8 +2175,7 @@ public sealed class WebServer
     {
         if (files.Count == 0)
             return new List<ChatAttachment>();
-        if (files.Count > MaxChatAttachments)
-            throw new InvalidOperationException($"At most {MaxChatAttachments} attachments are allowed.");
+        ValidateChatAttachmentLimits(files);
 
         var safeSession = NormalizeSessionId(session);
         var root = Path.GetFullPath(Path.Combine(_path.GetWorkspacePath(agent), "attachments", safeSession));
@@ -2143,9 +2191,9 @@ public sealed class WebServer
 
             var originalName = Path.GetFileName(string.IsNullOrWhiteSpace(file.FileName) ? "attachment" : file.FileName);
             var extension = Path.GetExtension(originalName).ToLowerInvariant();
-            var kind = GetChatAttachmentKind(extension);
+            var kind = GetChatAttachmentKind(extension, file.ContentType);
             if (kind == null)
-                throw new InvalidOperationException($"Unsupported attachment type: {extension}. Allowed: common images, common documents, and .zip archives.");
+                throw new InvalidOperationException($"Unsupported attachment type: {extension}. Allowed: common images, documents, spreadsheets, presentations, and archives.");
 
             var safeBase = MakeSafePathSegment(Path.GetFileNameWithoutExtension(originalName), "attachment");
             var id = UserTimeZoneService.Now().ToString("yyyyMMddHHmmssfff") + "-" + Guid.NewGuid().ToString("N")[..8];
@@ -2179,7 +2227,17 @@ public sealed class WebServer
         return result;
     }
 
-    private static string? GetChatAttachmentKind(string extension)
+    private static void ValidateChatAttachmentLimits(IReadOnlyList<IFormFile> files)
+    {
+        if (files.Count > MaxChatAttachments)
+            throw new InvalidOperationException($"At most {MaxChatAttachments} attachments are allowed.");
+
+        var total = files.Sum(file => file.Length);
+        if (total > MaxChatAttachmentTotalBytes)
+            throw new InvalidOperationException($"Attachments are too large. Total limit is {FormatBytes(MaxChatAttachmentTotalBytes)}.");
+    }
+
+    private static string? GetChatAttachmentKind(string extension, string? reportedMime = null)
     {
         if (ChatImageAttachmentExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase))
             return "image";
@@ -2187,6 +2245,31 @@ public sealed class WebServer
             return "archive";
         if (ChatDocumentAttachmentExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase))
             return "document";
+
+        var mime = (reportedMime ?? string.Empty).Trim().ToLowerInvariant();
+        if (mime.StartsWith("image/", StringComparison.Ordinal))
+            return "image";
+        if (mime.Contains("zip", StringComparison.Ordinal)
+            || mime.Contains("rar", StringComparison.Ordinal)
+            || mime.Contains("7z", StringComparison.Ordinal)
+            || mime.Contains("tar", StringComparison.Ordinal)
+            || mime.Contains("gzip", StringComparison.Ordinal)
+            || mime.Contains("bzip2", StringComparison.Ordinal)
+            || mime.Contains("xz", StringComparison.Ordinal)
+            || mime.Contains("compressed", StringComparison.Ordinal)
+            || mime.Contains("archive", StringComparison.Ordinal))
+        {
+            return "archive";
+        }
+        if (mime.StartsWith("text/", StringComparison.Ordinal)
+            || mime is "application/pdf" or "application/json" or "application/xml" or "application/rtf" or "application/msword"
+            || mime.StartsWith("application/vnd.ms-", StringComparison.Ordinal)
+            || mime.StartsWith("application/vnd.openxmlformats-", StringComparison.Ordinal)
+            || mime.StartsWith("application/vnd.oasis.opendocument", StringComparison.Ordinal)
+            || mime is "application/vnd.apple.pages" or "application/vnd.apple.numbers")
+        {
+            return "document";
+        }
         return null;
     }
 
@@ -2205,19 +2288,40 @@ public sealed class WebServer
             ".pdf" => "application/pdf",
             ".doc" => "application/msword",
             ".docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ".docm" => "application/vnd.ms-word.document.macroEnabled.12",
+            ".odt" => "application/vnd.oasis.opendocument.text",
             ".xls" => "application/vnd.ms-excel",
             ".xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ".xlsm" => "application/vnd.ms-excel.sheet.macroEnabled.12",
+            ".xlsb" => "application/vnd.ms-excel.sheet.binary.macroEnabled.12",
+            ".ods" => "application/vnd.oasis.opendocument.spreadsheet",
             ".ppt" => "application/vnd.ms-powerpoint",
             ".pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            ".pptm" => "application/vnd.ms-powerpoint.presentation.macroEnabled.12",
+            ".odp" => "application/vnd.oasis.opendocument.presentation",
             ".zip" => "application/zip",
+            ".rar" => "application/vnd.rar",
+            ".7z" => "application/x-7z-compressed",
+            ".tar" => "application/x-tar",
+            ".gz" or ".tgz" => "application/gzip",
+            ".bz2" => "application/x-bzip2",
+            ".xz" => "application/x-xz",
             ".csv" => "text/csv",
+            ".tsv" => "text/tab-separated-values",
             ".json" => "application/json",
             ".xml" => "application/xml",
             ".md" or ".markdown" => "text/markdown",
             ".txt" => "text/plain",
+            ".log" or ".ini" or ".sql" => "text/plain",
+            ".html" or ".htm" => "text/html",
+            ".css" => "text/css",
+            ".js" or ".mjs" or ".cjs" => "application/javascript",
+            ".ts" or ".tsx" or ".jsx" or ".py" or ".ps1" or ".sh" or ".bat" or ".cmd" => "text/plain",
             ".yaml" or ".yml" => "application/yaml",
             ".toml" => "application/toml",
             ".rtf" => "application/rtf",
+            ".pages" => "application/vnd.apple.pages",
+            ".numbers" => "application/vnd.apple.numbers",
             _ => "application/octet-stream"
         };
     }
@@ -2226,8 +2330,8 @@ public sealed class WebServer
         => kind switch
         {
             "image" => $"Image attachment '{name}' ({extension}, {FormatBytes(size)}). If the model supports multimodal input, Matdance will include the image pixels in the current request.",
-            "archive" => $"Zip archive attachment '{name}' ({FormatBytes(size)}). Inspect contents only when the task requires it.",
-            _ => $"Document attachment '{name}' ({extension}, {FormatBytes(size)}). Use file tools for text-compatible files or local extraction tools when needed."
+            "archive" => $"Archive attachment '{name}' ({extension}, {FormatBytes(size)}). Inspect or extract contents only when the task requires it.",
+            _ => $"Document attachment '{name}' ({extension}, {FormatBytes(size)}). Use file tools for text-compatible files or safe local conversion/extraction tools when needed."
         };
 
     private static string NormalizeSlashes(string value) => value.Replace('\\', '/');
@@ -2273,6 +2377,7 @@ public sealed class WebServer
         }
 
         var state = SessionState.Load(sessionFile);
+        state.ClearTraceLocks();
         var turnStartMessageIndex = state.Messages.Count;
         var config = AgentConfig.Load(_path.GetAgentConfigJsonPath(request.Agent));
         var llm = new LlmClient(config);
@@ -2301,11 +2406,19 @@ public sealed class WebServer
         {
             request.Message = "Please inspect the attached file(s).";
         }
-        var userMsg = ChatMessage.User(request.Message, request.Attachments.Count > 0 ? request.Attachments : null);
-        requestMessages.Add(userMsg);
-        data.TotalMessages++;
+        ChatMessage? userMsg = null;
+        if (request.ContinueFromHostNotice)
+        {
+            requestMessages.Add(ChatMessage.System("Host continuation trigger: authoritative image-generation notice(s) were added to this session. Continue from the latest host notice, inspect successful outputs, report failures or partial completion, and decide the next step without asking the user to restate the task."));
+        }
+        else
+        {
+            userMsg = ChatMessage.User(request.Message, request.Attachments.Count > 0 ? request.Attachments : null);
+            requestMessages.Add(userMsg);
+            data.TotalMessages++;
+        }
 
-        var userMsgSaved = false;
+        var userMsgSaved = request.ContinueFromHostNotice;
         var hasToolCalls = true;
         var loop = 0;
         var sawToolCalls = false;
@@ -2328,7 +2441,13 @@ public sealed class WebServer
             while (hasToolCalls && loop < maxLoops && !context.RequestAborted.IsCancellationRequested)
             {
                 loop++;
+                if (DrainHostImageNotices(request.Agent, request.Session, sessionFile, data, state, requestMessages) > 0)
+                {
+                    requestMessages.Add(ChatMessage.System("Host image-generation notice inserted during this turn. Treat it as authoritative host state and handle it before finalizing the user-facing response."));
+                    QueueEvent(events.Writer, "stats", StatsDto(data, state));
+                }
                 QueueEvent(events.Writer, "phase", new { phase = loop == 1 ? "thinking" : "integrating" });
+                PromptBuilder.UpsertLiveFileLocksSnapshot(requestMessages, state);
 
                 var streamed = new StringBuilder();
                 var streamFilter = new LlmResponseGuard.StreamingFilter();
@@ -2422,7 +2541,8 @@ public sealed class WebServer
 
                 if (!userMsgSaved)
                 {
-                    state.Messages.Add(userMsg);
+                    if (userMsg != null)
+                        state.Messages.Add(userMsg);
                     userMsgSaved = true;
                 }
 
@@ -2433,6 +2553,13 @@ public sealed class WebServer
 
                 if (assistantMsg.ToolCalls == null || assistantMsg.ToolCalls.Count == 0)
                 {
+                    if (DrainHostImageNotices(request.Agent, request.Session, sessionFile, data, state, requestMessages) > 0)
+                    {
+                        requestMessages.Add(ChatMessage.System("Host image-generation notice arrived after the latest assistant response. Continue now and handle the completed image job before ending the turn."));
+                        QueueEvent(events.Writer, "stats", StatsDto(data, state));
+                        hasToolCalls = true;
+                        continue;
+                    }
                     hasToolCalls = false;
                     continue;
                 }
@@ -2453,7 +2580,7 @@ public sealed class WebServer
 
                     var result = duplicateToolCall
                         ? "[skipped] Duplicate tool call suppressed for this turn."
-                        : await executor.ExecuteAsync(toolCall);
+                        : await executor.ExecuteAsync(toolCall, context.RequestAborted);
                     var toolMsg = ChatMessage.Tool(toolCall.Id, result);
                     state.Messages.Add(toolMsg);
                     requestMessages.Add(toolMsg);
@@ -2508,6 +2635,7 @@ public sealed class WebServer
             }
 
             UpdateContextUsage(data, config);
+            state.ClearTraceLocks();
             SaveSession(sessionFile, data, state);
             QueueEvent(events.Writer, "done", new
             {
@@ -2521,14 +2649,22 @@ public sealed class WebServer
         }
         catch (OperationCanceledException)
         {
+            state.ClearTraceLocks();
+            SaveSession(sessionFile, data, state);
         }
         catch (Exception ex)
         {
             QueueEvent(events.Writer, "error", new { message = ex.Message });
+            state.ClearTraceLocks();
             SaveSession(sessionFile, data, state);
         }
         finally
         {
+            var cleared = state.ClearTraceLocks();
+            if (cleared > 0)
+            {
+                try { SaveSession(sessionFile, data, state); } catch { }
+            }
             events.Writer.TryComplete();
             try
             {
@@ -2564,6 +2700,56 @@ public sealed class WebServer
         data.LastActivity = UserTimeZoneService.Now();
         data.Save(sessionFile);
         state.Save(sessionFile);
+    }
+
+    private static int DrainHostImageNotices(
+        string agent,
+        string session,
+        string sessionFile,
+        SessionData data,
+        SessionState state,
+        List<ChatMessage> requestMessages)
+    {
+        var notices = SessionHostNoticeHub.Drain(agent, session)
+            .Where(message => string.Equals(message.MessageType, "image_generation_notice", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (notices.Count == 0)
+            return 0;
+
+        foreach (var notice in notices)
+        {
+            state.Messages.Add(notice);
+            requestMessages.Add(notice);
+            data.TotalMessages++;
+        }
+
+        SaveSession(sessionFile, data, state);
+        return notices.Count;
+    }
+
+    private void PersistQueuedHostImageNotices(string agent, string session)
+    {
+        var notices = SessionHostNoticeHub.Drain(agent, session)
+            .Where(message => string.Equals(message.MessageType, "image_generation_notice", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (notices.Count == 0)
+            return;
+
+        try
+        {
+            var sessionFile = GetSessionFile(agent, session);
+            var data = SessionData.Load(sessionFile);
+            var state = SessionState.Load(sessionFile);
+            foreach (var notice in notices)
+            {
+                state.Messages.Add(notice);
+                data.TotalMessages++;
+            }
+            SaveSession(sessionFile, data, state);
+        }
+        catch
+        {
+        }
     }
 
     private void AttachAudioToMessage(string agent, string session, int messageIndex, GeneratedFileResult audio)
@@ -2947,6 +3133,7 @@ public sealed class WebServer
         public string Agent { get; set; } = string.Empty;
         public string Session { get; set; } = string.Empty;
         public string Message { get; set; } = string.Empty;
+        public bool ContinueFromHostNotice { get; set; }
         public List<IFormFile> UploadFiles { get; set; } = new();
         public List<ChatAttachment> Attachments { get; set; } = new();
     }
@@ -3085,16 +3272,32 @@ public sealed class WebServer
             ".md" or ".markdown" => "text/markdown",
             ".xml" => "application/xml",
             ".csv" => "text/csv",
+            ".tsv" => "text/tab-separated-values",
             ".yaml" or ".yml" => "application/yaml",
             ".toml" => "application/toml",
             ".rtf" => "application/rtf",
             ".zip" => "application/zip",
+            ".rar" => "application/vnd.rar",
+            ".7z" => "application/x-7z-compressed",
+            ".tar" => "application/x-tar",
+            ".gz" or ".tgz" => "application/gzip",
+            ".bz2" => "application/x-bzip2",
+            ".xz" => "application/x-xz",
             ".doc" => "application/msword",
             ".docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ".docm" => "application/vnd.ms-word.document.macroEnabled.12",
+            ".odt" => "application/vnd.oasis.opendocument.text",
             ".xls" => "application/vnd.ms-excel",
             ".xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ".xlsm" => "application/vnd.ms-excel.sheet.macroEnabled.12",
+            ".xlsb" => "application/vnd.ms-excel.sheet.binary.macroEnabled.12",
+            ".ods" => "application/vnd.oasis.opendocument.spreadsheet",
             ".ppt" => "application/vnd.ms-powerpoint",
             ".pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            ".pptm" => "application/vnd.ms-powerpoint.presentation.macroEnabled.12",
+            ".odp" => "application/vnd.oasis.opendocument.presentation",
+            ".pages" => "application/vnd.apple.pages",
+            ".numbers" => "application/vnd.apple.numbers",
             ".mp3" => "audio/mpeg",
             ".wav" => "audio/wav",
             ".ogg" => "audio/ogg",

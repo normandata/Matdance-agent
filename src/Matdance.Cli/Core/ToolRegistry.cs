@@ -14,8 +14,14 @@ public static class ToolRegistry
             TaskManager(),
             MemoryStore(),
             MemorySearch(),
+            FileSearch(),
+            FileTraceOpen(),
+            FileTraceShow(),
+            FileTraceClose(),
             FileRead(),
-            FileWrite()
+            FileWrite(),
+            FileWriteLocks(),
+            FileWriteLockClose()
         };
 
         if (includeScheduledTaskTools)
@@ -34,6 +40,9 @@ public static class ToolRegistry
         tools.AddRange(new[] { SkillCreate(), SkillRead(), SkillEditor(), SkillDelete() });
         tools.Add(ImageGenerationListProfiles());
         tools.Add(ImageGeneration());
+        tools.Add(ImageGenerationShowProcess());
+        tools.Add(ImageGenerationCancel());
+        tools.Add(ImageGenerationRetry());
         tools.Add(TextToSpeechListProfiles());
         tools.Add(TextToSpeech());
         tools.Add(WebSearchListProfiles());
@@ -48,7 +57,7 @@ public static class ToolRegistry
         return new ToolDefinition
         {
             Name = "bash",
-            Description = $"Execute a shell command through {MatdanceRuntime.ShellInvocation} on {MatdanceRuntime.OsName}. Use commands and path syntax appropriate for this OS. Dangerous commands require user confirmation. The command runs from the agent workspace and has a bounded timeout; foreground dev servers, watchers, and long-running processes will be terminated on timeout, including child processes. Use short bounded checks instead of leaving servers running inside this tool. The command must not access Matdance source/internal state, credentials, cookie stores, parent directories, or private user paths unless Settings explicitly allows privacy access. {privacyState} If privacy access is disabled, do not call this tool to probe user-private paths, home/profile folders, cloud drives, account content, or known-folder/environment-variable shortcuts.",
+            Description = $"Execute a shell command through {MatdanceRuntime.ShellInvocation} on {MatdanceRuntime.OsName}. Use commands and path syntax appropriate for this OS. When installing or downloading packages/assets, choose per-command/project-scoped download sources appropriate to the user's inferred region and the downloader involved, such as pip indexes, npm/pnpm/yarn registries, conda channels, Maven/Gradle repositories, NuGet feeds, Go proxies, Rust registries, OS package mirrors, model hubs, or vendor release mirrors. Dangerous commands require user confirmation. The command runs from the agent workspace and has a bounded timeout; foreground dev servers, watchers, and long-running processes will be terminated on timeout, including child processes. Use short bounded checks instead of leaving servers running inside this tool. The command must not access Matdance source/internal state, credentials, cookie stores, parent directories, or private user paths unless Settings explicitly allows privacy access. {privacyState} If privacy access is disabled, do not call this tool to probe user-private paths, home/profile folders, cloud drives, account content, or known-folder/environment-variable shortcuts.",
             Parameters = new JsonObject
             {
                 ["type"] = "object",
@@ -144,7 +153,7 @@ public static class ToolRegistry
         return new ToolDefinition
         {
             Name = "file_read",
-            Description = $"Read a file and optionally trace it (keep its live content in context, max 3 traced files). Use untrace=true to stop tracking a file. By default this is limited to the agent workspace and preview-safe runtime output; private user files require the global privacy access switch. {privacyState} Matdance source, runtime state, credentials, cookie stores, task run records, and secret-bearing files are never readable through this tool.",
+            Description = $"Read a full text-compatible file and keep a compatibility read trace. Do not use this for raster/image visual inspection: image files are visual inputs, not binary/code text, and the tool will refuse to dump them. Prefer `file_search` plus `file_trace_open/show/close` for debugging and edits because trace locks expose live windows and force you to manage context. Use untrace=true to stop tracking a file. By default this is limited to the agent workspace and preview-safe runtime output; private user files require the global privacy access switch. {privacyState} Matdance source, runtime state, credentials, cookie stores, task run records, and secret-bearing files are never readable through this tool.",
             Parameters = new JsonObject
             {
                 ["type"] = "object",
@@ -164,17 +173,157 @@ public static class ToolRegistry
         return new ToolDefinition
         {
             Name = "file_write",
-            Description = "Write or append content to a file in the agent workspace only. This tool cannot modify Matdance source, plugin source, runtime state, credentials, scheduled run records, cookie stores, agent config, or private user locations.",
+            Description = "Write, append, or replace expected text in a workspace file. Successful writes automatically open or refresh a write lock around the changed region so you can verify the current file reality. For targeted edits, prefer expected+replace_with instead of rewriting a whole file. This tool cannot modify Matdance source, plugin source, runtime state, credentials, scheduled run records, cookie stores, agent config, or private user locations.",
             Parameters = new JsonObject
             {
                 ["type"] = "object",
                 ["properties"] = new JsonObject
                 {
                     ["path"] = new JsonObject { ["type"] = "string", ["description"] = "Relative or absolute file path" },
-                    ["content"] = new JsonObject { ["type"] = "string", ["description"] = "Content to write" },
-                    ["append"] = new JsonObject { ["type"] = "boolean", ["description"] = "Append instead of overwrite", ["default"] = false }
+                    ["content"] = new JsonObject { ["type"] = "string", ["description"] = "Content to write or append. Required for overwrite/append mode." },
+                    ["append"] = new JsonObject { ["type"] = "boolean", ["description"] = "Append content instead of overwriting", ["default"] = false },
+                    ["expected"] = new JsonObject { ["type"] = "string", ["description"] = "Exact current text to replace. Use with replace_with for safer targeted edits." },
+                    ["replace_with"] = new JsonObject { ["type"] = "string", ["description"] = "Replacement text for expected." },
+                    ["replace_all"] = new JsonObject { ["type"] = "boolean", ["description"] = "Replace every occurrence of expected instead of the first occurrence.", ["default"] = false }
                 },
-                ["required"] = new JsonArray("path", "content")
+                ["required"] = new JsonArray("path")
+            }
+        };
+    }
+
+    private static ToolDefinition FileSearch()
+    {
+        var privacyState = PrivacyToolDescription();
+        return new ToolDefinition
+        {
+            Name = "file_search",
+            Description = $"Search files for navigation only. Results may include line numbers and snippets, but they are not stable edit coordinates; open a read trace before relying on nearby content. {privacyState}",
+            Parameters = new JsonObject
+            {
+                ["type"] = "object",
+                ["properties"] = new JsonObject
+                {
+                    ["query"] = new JsonObject { ["type"] = "string", ["description"] = "Single literal or regex query" },
+                    ["queries"] = new JsonObject { ["type"] = "array", ["items"] = new JsonObject { ["type"] = "string" }, ["description"] = "Batch queries" },
+                    ["paths"] = new JsonObject { ["type"] = "array", ["items"] = new JsonObject { ["type"] = "string" }, ["description"] = "Files or directories to search. Omit to search the workspace projects directory." },
+                    ["regex"] = new JsonObject { ["type"] = "boolean", ["default"] = false },
+                    ["case_sensitive"] = new JsonObject { ["type"] = "boolean", ["default"] = false },
+                    ["max_matches"] = new JsonObject { ["type"] = "integer", ["default"] = 80 },
+                    ["before"] = new JsonObject { ["type"] = "integer", ["default"] = 1 },
+                    ["after"] = new JsonObject { ["type"] = "integer", ["default"] = 1 }
+                }
+            }
+        };
+    }
+
+    private static ToolDefinition FileTraceOpen()
+    {
+        return new ToolDefinition
+        {
+            Name = "file_trace_open",
+            Description = "Open one or more turn-scoped read locks for text-compatible files. Do not use read locks for raster/image visual inspection; image files are visual inputs, not binary/code text. Read locks are live windows over current files, max 3 total, max 2000 lines per lock, with file-size, metadata-read, and text-read timeout guards. The host clears all read/write locks when the reply turn finishes. Use semantic mode with anchor text for code blocks that may move; use physical mode for scanning a fixed line range. Close locks you no longer need during the turn.",
+            Parameters = new JsonObject
+            {
+                ["type"] = "object",
+                ["properties"] = new JsonObject
+                {
+                    ["path"] = new JsonObject { ["type"] = "string", ["description"] = "Single file path" },
+                    ["locks"] = new JsonObject
+                    {
+                        ["type"] = "array",
+                        ["items"] = new JsonObject
+                        {
+                            ["type"] = "object",
+                            ["properties"] = new JsonObject
+                            {
+                                ["path"] = new JsonObject { ["type"] = "string" },
+                                ["anchor"] = new JsonObject { ["type"] = "string", ["description"] = "Text to semantically anchor around" },
+                                ["mode"] = new JsonObject { ["type"] = "string", ["enum"] = new JsonArray("semantic", "physical", "full"), ["default"] = "semantic" },
+                                ["start_line"] = new JsonObject { ["type"] = "integer" },
+                                ["end_line"] = new JsonObject { ["type"] = "integer" },
+                                ["max_lines"] = new JsonObject { ["type"] = "integer", ["default"] = 240, ["description"] = "1-2000" }
+                            },
+                            ["required"] = new JsonArray("path")
+                        }
+                    },
+                    ["anchor"] = new JsonObject { ["type"] = "string" },
+                    ["mode"] = new JsonObject { ["type"] = "string", ["enum"] = new JsonArray("semantic", "physical", "full") },
+                    ["start_line"] = new JsonObject { ["type"] = "integer" },
+                    ["end_line"] = new JsonObject { ["type"] = "integer" },
+                    ["max_lines"] = new JsonObject { ["type"] = "integer", ["default"] = 240 }
+                }
+            }
+        };
+    }
+
+    private static ToolDefinition FileTraceShow()
+    {
+        return new ToolDefinition
+        {
+            Name = "file_trace_show",
+            Description = "Refresh and show current live content from this turn's read locks and/or write locks. The live lock output is more authoritative than your memory or older tool results. Output and refresh work are bounded; if a lock reports metadata_timeout/read_timeout, close it or open a narrower/local trace. Locks are cleared when the reply turn finishes.",
+            Parameters = new JsonObject
+            {
+                ["type"] = "object",
+                ["properties"] = new JsonObject
+                {
+                    ["ids"] = new JsonObject { ["type"] = "array", ["items"] = new JsonObject { ["type"] = "string" }, ["description"] = "Specific read or write lock ids. Omit to show all locks." },
+                    ["kind"] = new JsonObject { ["type"] = "string", ["enum"] = new JsonArray("read", "write", "all"), ["default"] = "all" }
+                }
+            }
+        };
+    }
+
+    private static ToolDefinition FileTraceClose()
+    {
+        return new ToolDefinition
+        {
+            Name = "file_trace_close",
+            Description = "Close read locks or write locks that are no longer useful. Free locks before opening distant windows.",
+            Parameters = new JsonObject
+            {
+                ["type"] = "object",
+                ["properties"] = new JsonObject
+                {
+                    ["ids"] = new JsonObject { ["type"] = "array", ["items"] = new JsonObject { ["type"] = "string" } },
+                    ["kind"] = new JsonObject { ["type"] = "string", ["enum"] = new JsonArray("read", "write", "all"), ["default"] = "read" },
+                    ["path"] = new JsonObject { ["type"] = "string", ["description"] = "Optional path; closes locks for this file and kind." }
+                }
+            }
+        };
+    }
+
+    private static ToolDefinition FileWriteLocks()
+    {
+        return new ToolDefinition
+        {
+            Name = "file_write_locks",
+            Description = "List or refresh current write locks. Use after writes to verify the changed region is correct, then close locks that are no longer needed. Output and refresh work are bounded; timeout locks must not be used for edits.",
+            Parameters = new JsonObject
+            {
+                ["type"] = "object",
+                ["properties"] = new JsonObject
+                {
+                    ["ids"] = new JsonObject { ["type"] = "array", ["items"] = new JsonObject { ["type"] = "string" } }
+                }
+            }
+        };
+    }
+
+    private static ToolDefinition FileWriteLockClose()
+    {
+        return new ToolDefinition
+        {
+            Name = "file_write_lock_close",
+            Description = "Close one or more write locks after you have verified the modified region.",
+            Parameters = new JsonObject
+            {
+                ["type"] = "object",
+                ["properties"] = new JsonObject
+                {
+                    ["ids"] = new JsonObject { ["type"] = "array", ["items"] = new JsonObject { ["type"] = "string" } },
+                    ["path"] = new JsonObject { ["type"] = "string" }
+                }
             }
         };
     }
@@ -253,7 +402,7 @@ public static class ToolRegistry
         return new ToolDefinition
         {
             Name = "skill_create",
-            Description = "Create a new skill for practiced, confirmed, reusable workflows, domain best practices, or vertical expertise. Skills persist across sessions and help maintain consistency. Do not create skills from guesses, promises, future plans, ordinary chat summaries, private-data access patterns, credential handling, or unverified commands/configurations.",
+            Description = "Create a new skill for practiced, confirmed, reusable workflows, domain best practices, or vertical expertise. Skills persist across sessions and help maintain consistency. Content should be reproducible and include when to use it, preconditions, workflow, tools/parameters, expected outputs, failure handling, and boundaries. Do not create skills from guesses, promises, future plans, ordinary chat summaries, private-data access patterns, credential handling, or unverified commands/configurations.",
             Parameters = new JsonObject
             {
                 ["type"] = "object",
@@ -262,7 +411,7 @@ public static class ToolRegistry
                     ["name"] = new JsonObject { ["type"] = "string", ["description"] = "Skill name (max 50 chars)" },
                     ["description"] = new JsonObject { ["type"] = "string", ["description"] = "Brief description of what this skill covers (max 300 chars)" },
                     ["tags"] = new JsonObject { ["type"] = "array", ["items"] = new JsonObject { ["type"] = "string" }, ["description"] = "Optional tags for categorization" },
-                    ["content"] = new JsonObject { ["type"] = "string", ["description"] = "Detailed workflow, guidelines, or instructions. This is the full skill content." }
+                    ["content"] = new JsonObject { ["type"] = "string", ["description"] = "Full reproducible skill content. Include sections for When to Use, Preconditions, Workflow, Tools and Parameters, Expected Outputs, Failure Handling, and Boundaries when applicable." }
                 },
                 ["required"] = new JsonArray("name", "description", "content")
             }
@@ -292,7 +441,7 @@ public static class ToolRegistry
         return new ToolDefinition
         {
             Name = "skill_editor",
-            Description = "Edit an existing skill to update its content, description, or tags after completing a workflow or discovering confirmed improvements. Do not turn guesses, promises, future plans, ordinary chat summaries, private-data access patterns, credential handling, or unverified commands/configurations into durable skill instructions.",
+            Description = "Edit an existing skill to update its content, description, or tags after completing a workflow or discovering confirmed improvements. Keep content reproducible: when to use it, preconditions, workflow, tools/parameters, expected outputs, failure handling, and boundaries. Do not turn guesses, promises, future plans, ordinary chat summaries, private-data access patterns, credential handling, or unverified commands/configurations into durable skill instructions.",
             Parameters = new JsonObject
             {
                 ["type"] = "object",
@@ -332,14 +481,15 @@ public static class ToolRegistry
         return new ToolDefinition
         {
             Name = "image_generation",
-            Description = "Generate images through one of the configured image model profiles and save them into the agent workspace. Use for user-requested image creation, visual assets, mockups, illustrations, and generated media. Omit profile to use the configured default/auto profile order. If you need to know available profiles first, call image_generation_list_profiles.",
+            Description = "Start an asynchronous host-managed image generation job through the configured image model profiles and save results into the agent workspace. The host job state and image_generation_show_process are the only authoritative sources for status, provider fallback, errors, and file locations. Keep prompt concise: normally 1-30 characters; only use 31-50 characters when the user explicitly asks for a complex scene or the scene cannot be shortened. Omit profile to use the configured default/auto profile order. Use the same batch_id for related images. Do not wait synchronously for completion; continue other work and query progress when needed.",
             Parameters = new JsonObject
             {
                 ["type"] = "object",
                 ["properties"] = new JsonObject
                 {
                     ["profile"] = new JsonObject { ["type"] = "string", ["description"] = "Optional image model profile id/name. Omit to use the configured default/auto profile order." },
-                    ["prompt"] = new JsonObject { ["type"] = "string", ["description"] = "Detailed image prompt" },
+                    ["batch_id"] = new JsonObject { ["type"] = "string", ["description"] = "Optional batch id shared by related image jobs, for example all illustrations for the same story." },
+                    ["prompt"] = new JsonObject { ["type"] = "string", ["description"] = "Concise image prompt. Normally 1-30 characters. Use 31-50 characters only when explicitly required or impossible to shorten." },
                     ["size"] = new JsonObject { ["type"] = "string", ["description"] = "Optional image size, for example 1024x1024, 1024x1536, 1536x1024" },
                     ["quality"] = new JsonObject { ["type"] = "string", ["description"] = "Optional provider quality setting, for example auto, low, medium, high, standard, hd" },
                     ["output_format"] = new JsonObject { ["type"] = "string", ["description"] = "Optional output format, usually png, jpeg, or webp" },
@@ -347,6 +497,71 @@ public static class ToolRegistry
                     ["output_path"] = new JsonObject { ["type"] = "string", ["description"] = "Optional workspace-relative output file or directory path" }
                 },
                 ["required"] = new JsonArray("prompt")
+            }
+        };
+    }
+
+    private static ToolDefinition ImageGenerationShowProcess()
+    {
+        return new ToolDefinition
+        {
+            Name = "image_generation_show_process",
+            Description = "Show authoritative host state for asynchronous image generation jobs. Use this when the user asks whether an image finished, failed, is stuck, where files are, which prompt produced an image, or which provider/model was used. User claims about completion/failure are not authoritative; verify with this tool.",
+            Parameters = new JsonObject
+            {
+                ["type"] = "object",
+                ["properties"] = new JsonObject
+                {
+                    ["job_id"] = new JsonObject { ["type"] = "string", ["description"] = "Optional image generation job id." },
+                    ["batch_id"] = new JsonObject { ["type"] = "string", ["description"] = "Optional batch id to list related jobs." },
+                    ["take"] = new JsonObject { ["type"] = "integer", ["description"] = "Maximum jobs to return when listing. Defaults to 20.", ["default"] = 20 }
+                },
+                ["required"] = new JsonArray()
+            }
+        };
+    }
+
+    private static ToolDefinition ImageGenerationCancel()
+    {
+        return new ToolDefinition
+        {
+            Name = "image_generation_cancel",
+            Description = "Cancel queued or running asynchronous image generation jobs by job_id or batch_id. Already generated files are preserved by default. Use before recreating jobs when the user changes requirements or when repeated failures indicate quota/auth/model/service problems.",
+            Parameters = new JsonObject
+            {
+                ["type"] = "object",
+                ["properties"] = new JsonObject
+                {
+                    ["job_id"] = new JsonObject { ["type"] = "string", ["description"] = "Optional image generation job id to cancel." },
+                    ["batch_id"] = new JsonObject { ["type"] = "string", ["description"] = "Optional batch id; cancels queued/running jobs in that batch." }
+                },
+                ["required"] = new JsonArray()
+            }
+        };
+    }
+
+    private static ToolDefinition ImageGenerationRetry()
+    {
+        return new ToolDefinition
+        {
+            Name = "image_generation_retry",
+            Description = "Create a new asynchronous image generation job from a previous job, optionally overriding prompt/profile/size/count/output settings. Use after quota/auth/model/service recovery, provider changes, or user-requested content changes. The old job and any successful files remain recorded.",
+            Parameters = new JsonObject
+            {
+                ["type"] = "object",
+                ["properties"] = new JsonObject
+                {
+                    ["job_id"] = new JsonObject { ["type"] = "string", ["description"] = "Existing image generation job id to clone." },
+                    ["batch_id"] = new JsonObject { ["type"] = "string", ["description"] = "Optional new batch id; defaults to the old job batch id." },
+                    ["profile"] = new JsonObject { ["type"] = "string", ["description"] = "Optional replacement image model profile." },
+                    ["prompt"] = new JsonObject { ["type"] = "string", ["description"] = "Optional replacement concise prompt, normally 1-30 characters and at most 50 unless unavoidable." },
+                    ["size"] = new JsonObject { ["type"] = "string", ["description"] = "Optional replacement size." },
+                    ["quality"] = new JsonObject { ["type"] = "string", ["description"] = "Optional replacement quality." },
+                    ["output_format"] = new JsonObject { ["type"] = "string", ["description"] = "Optional replacement output format." },
+                    ["count"] = new JsonObject { ["type"] = "integer", ["description"] = "Optional replacement count, 1-4." },
+                    ["output_path"] = new JsonObject { ["type"] = "string", ["description"] = "Optional replacement output path." }
+                },
+                ["required"] = new JsonArray("job_id")
             }
         };
     }
@@ -454,7 +669,7 @@ public static class ToolRegistry
             new ToolDefinition
             {
                 Name = "browser_navigate",
-                Description = $"Navigate the background browser to a URL. Launches the browser automatically if not running; visible/headless=false launch requests are ignored so automation does not pull a foreground browser over the user. Preserve the current task's browser state: do not navigate away, refresh, or switch headless/visible mode as a generic recovery tactic. If the site requires login, account selection, verification, or CAPTCHA, stop and ask the user to complete it through an available user-controlled auth surface; do not bypass or dismiss authentication walls. {privacyState} If privacy access is disabled, do not navigate to file:// paths or private/account pages for the purpose of reading user-private content.",
+                Description = $"Navigate the isolated Matdance-controlled background browser to a URL. This cannot control or read the user's normal browser profiles, tabs, history, extensions, cookies, or passwords. Launches the controlled browser automatically if not running; visible/headless=false launch requests are ignored so automation does not pull a foreground browser over the user. Preserve the current task's browser state: do not navigate away, refresh, or switch headless/visible mode as a generic recovery tactic. If the site requires login, account selection, verification, or CAPTCHA, stop and ask the user to complete it through an available user-controlled auth surface; do not bypass or dismiss authentication walls. {privacyState} If privacy access is disabled, do not navigate to file:// paths or private/account pages for the purpose of reading user-private content.",
                 Parameters = new JsonObject
                 {
                     ["type"] = "object",
@@ -462,7 +677,7 @@ public static class ToolRegistry
                     {
                         ["url"] = new JsonObject { ["type"] = "string", ["description"] = "URL to navigate to" },
                         ["headless"] = new JsonObject { ["type"] = "boolean", ["description"] = "Compatibility option only. Matdance keeps browser automation in background mode; headless=false is ignored.", ["default"] = true },
-                        ["wait_network_idle"] = new JsonObject { ["type"] = "integer", ["description"] = "Seconds to wait for network idle after navigation (default 0 = don't wait)", ["default"] = 0 }
+                        ["wait_network_idle"] = new JsonObject { ["type"] = "integer", ["description"] = "Seconds to wait for network idle after navigation, clamped to 0-30. Default 0 = don't wait.", ["default"] = 0 }
                     },
                     ["required"] = new JsonArray("url")
                 }
@@ -477,7 +692,7 @@ public static class ToolRegistry
                     ["properties"] = new JsonObject
                     {
                         ["selector"] = new JsonObject { ["type"] = "string", ["description"] = "CSS selector of the element to click" },
-                        ["timeout"] = new JsonObject { ["type"] = "integer", ["description"] = "Timeout in milliseconds (default 5000)", ["default"] = 5000 }
+                        ["timeout"] = new JsonObject { ["type"] = "integer", ["description"] = "Timeout in milliseconds, clamped to 500-30000. Defaults to 5000.", ["default"] = 5000 }
                     },
                     ["required"] = new JsonArray("selector")
                 }
@@ -494,7 +709,7 @@ public static class ToolRegistry
                         ["selector"] = new JsonObject { ["type"] = "string", ["description"] = "CSS selector of the input field" },
                         ["text"] = new JsonObject { ["type"] = "string", ["description"] = "Text to type" },
                         ["submit"] = new JsonObject { ["type"] = "boolean", ["description"] = "Press Enter after typing (default false)", ["default"] = false },
-                        ["timeout"] = new JsonObject { ["type"] = "integer", ["description"] = "Timeout in milliseconds (default 5000)", ["default"] = 5000 }
+                        ["timeout"] = new JsonObject { ["type"] = "integer", ["description"] = "Timeout in milliseconds, clamped to 500-30000. Defaults to 5000.", ["default"] = 5000 }
                     },
                     ["required"] = new JsonArray("selector", "text")
                 }
@@ -524,7 +739,7 @@ public static class ToolRegistry
                     ["properties"] = new JsonObject
                     {
                         ["html"] = new JsonObject { ["type"] = "boolean", ["description"] = "Return HTML instead of text (default false)", ["default"] = false },
-                        ["max_length"] = new JsonObject { ["type"] = "integer", ["description"] = "Max characters to return (default 12000)", ["default"] = 12000 }
+                        ["max_length"] = new JsonObject { ["type"] = "integer", ["description"] = "Max characters to return, clamped to 500-50000. Defaults to 12000.", ["default"] = 12000 }
                     },
                     ["required"] = new JsonArray()
                 }
@@ -581,8 +796,80 @@ public static class ToolRegistry
             },
             new ToolDefinition
             {
+                Name = "browser_source_analyze",
+                Description = $"Return a structured source-level summary of the current page: script/style inventory, forms, metadata, links, and inline handler locations. Use this for page architecture/source analysis before resorting to custom JavaScript. It does not read cookies, localStorage, sessionStorage, indexedDB, or credential values. Inline source previews are disabled by default and should be enabled only when the task needs code inspection and privacy rules allow it. {privacyState}",
+                Parameters = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["include_inline"] = new JsonObject { ["type"] = "boolean", ["description"] = "Include short previews of inline script/style/handler source. Defaults to false.", ["default"] = false },
+                        ["limit"] = new JsonObject { ["type"] = "integer", ["description"] = "Maximum items per category, clamped to 1-200. Defaults to 80.", ["default"] = 80 }
+                    },
+                    ["required"] = new JsonArray()
+                }
+            },
+            new ToolDefinition
+            {
+                Name = "browser_verify",
+                Description = $"Verify a bounded page condition and return ok/failed diagnostics without long custom JavaScript: selector state, visible text, URL condition, load state, or a short safe predicate. Use this after navigation, clicks, typing, injection, or crawl steps to confirm behavior. It is not a bypass for login, CAPTCHA, paywalls, or account checks. {privacyState}",
+                Parameters = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["kind"] = new JsonObject { ["type"] = "string", ["enum"] = new JsonArray("selector", "text", "url", "load_state", "function"), ["description"] = "Verification condition type." },
+                        ["selector"] = new JsonObject { ["type"] = "string", ["description"] = "CSS selector for kind=selector." },
+                        ["text"] = new JsonObject { ["type"] = "string", ["description"] = "Text fragment, URL fragment/regex body, or short JavaScript predicate for kind=function." },
+                        ["state"] = new JsonObject { ["type"] = "string", ["enum"] = new JsonArray("attached", "detached", "visible", "hidden", "domcontentloaded", "load", "networkidle"), ["description"] = "Selector state or load state." },
+                        ["regex"] = new JsonObject { ["type"] = "boolean", ["description"] = "Treat text as regex for text/url verification.", ["default"] = false },
+                        ["negate"] = new JsonObject { ["type"] = "boolean", ["description"] = "Verify the condition is absent/false where supported.", ["default"] = false },
+                        ["timeout"] = new JsonObject { ["type"] = "integer", ["description"] = "Timeout in milliseconds, clamped to 500-30000. Defaults to 10000.", ["default"] = 10000 }
+                    },
+                    ["required"] = new JsonArray("kind")
+                }
+            },
+            new ToolDefinition
+            {
+                Name = "browser_crawl",
+                Description = $"Perform a bounded link crawl from the current page or start_url. It only follows discovered http(s) links, defaults to same-origin, returns title/text previews/link summaries, redacts sensitive URL query values, and has a 90-second total tool budget. It does not click buttons/forms, bypass login, or read browser storage. {privacyState} If privacy access is disabled, do not crawl private/account pages to extract user-private content.",
+                Parameters = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["start_url"] = new JsonObject { ["type"] = "string", ["description"] = "Optional starting URL. Defaults to the current page if it is http(s)." },
+                        ["max_pages"] = new JsonObject { ["type"] = "integer", ["description"] = "Maximum pages, clamped to 1-20. Defaults to 5.", ["default"] = 5 },
+                        ["max_depth"] = new JsonObject { ["type"] = "integer", ["description"] = "Maximum link depth, clamped to 0-3. Defaults to 1.", ["default"] = 1 },
+                        ["same_origin"] = new JsonObject { ["type"] = "boolean", ["description"] = "Only follow same-origin links. Defaults to true.", ["default"] = true },
+                        ["max_chars"] = new JsonObject { ["type"] = "integer", ["description"] = "Maximum text preview characters per page, clamped to 200-8000. Defaults to 2000.", ["default"] = 2000 },
+                        ["restore"] = new JsonObject { ["type"] = "boolean", ["description"] = "Navigate back to the original page after crawling when possible. Defaults to true.", ["default"] = true }
+                    },
+                    ["required"] = new JsonArray()
+                }
+            },
+            new ToolDefinition
+            {
+                Name = "browser_trace",
+                Description = "Start, read, or stop a bounded browser event trace for current/future page activity. It records high-level network request/response URLs/status/resource types and console messages only; it does not record request/response headers, bodies, cookies, storage, credentials, or token values. Sensitive URL query values are redacted.",
+                Parameters = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["action"] = new JsonObject { ["type"] = "string", ["enum"] = new JsonArray("start", "read", "stop"), ["description"] = "Trace action. Defaults to read.", ["default"] = "read" },
+                        ["network"] = new JsonObject { ["type"] = "boolean", ["description"] = "Record high-level network events when starting. Defaults to true.", ["default"] = true },
+                        ["console"] = new JsonObject { ["type"] = "boolean", ["description"] = "Record console events when starting. Defaults to true.", ["default"] = true },
+                        ["max_events"] = new JsonObject { ["type"] = "integer", ["description"] = "Trace ring buffer size, clamped to 20-1000. Defaults to 200.", ["default"] = 200 },
+                        ["take"] = new JsonObject { ["type"] = "integer", ["description"] = "Events to return for read/stop, clamped to 1-300. Defaults to 80.", ["default"] = 80 }
+                    },
+                    ["required"] = new JsonArray()
+                }
+            },
+            new ToolDefinition
+            {
                 Name = "browser_scroll",
-                Description = "Scroll the current page or an element in bounded steps, optionally stopping when a selector or text appears. Use for lazy-loaded pages and infinite-scroll result lists. Do not use it to evade access controls or anti-bot challenges.",
+                Description = "Scroll the current page or an element in bounded steps with a 45-second total tool budget, optionally stopping when a selector or text appears. Use for lazy-loaded pages and infinite-scroll result lists. Do not use it to evade access controls or anti-bot challenges.",
                 Parameters = new JsonObject
                 {
                     ["type"] = "object",
@@ -602,13 +889,13 @@ public static class ToolRegistry
             new ToolDefinition
             {
                 Name = "browser_inject_init_script",
-                Description = "Install a small JavaScript init script for future navigations in the controlled browser context, for lightweight instrumentation such as marking loaded components or collecting non-sensitive DOM timing. This tool rejects scripts that mention cookies, storage, credentials, passwords, tokens, CAPTCHA, paywalls, webdriver/navigator spoofing, network interception, or other access-control/anti-bot bypass patterns.",
+                Description = "Install a JavaScript init script for future navigations in the controlled browser context, for lightweight instrumentation such as marking loaded components, collecting non-sensitive DOM timing, or tracing high-level network events. This tool rejects scripts that mention cookies, storage, credentials, passwords, tokens, CAPTCHA, paywalls, webdriver/navigator spoofing, privileged request headers, service workers, or access-control/anti-bot bypass patterns.",
                 Parameters = new JsonObject
                 {
                     ["type"] = "object",
                     ["properties"] = new JsonObject
                     {
-                        ["script"] = new JsonObject { ["type"] = "string", ["description"] = "Small init script to run before future page scripts. Max 4000 characters." },
+                        ["script"] = new JsonObject { ["type"] = "string", ["description"] = "Init script to run before future page scripts. Max 25000 characters." },
                         ["purpose"] = new JsonObject { ["type"] = "string", ["description"] = "Short human-readable reason for the injection." }
                     },
                     ["required"] = new JsonArray("script", "purpose")

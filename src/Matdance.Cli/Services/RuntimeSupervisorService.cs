@@ -73,8 +73,10 @@ public sealed class RuntimeSupervisorService
 
     private async Task ConfigureWindowsTasksAsync(string mode, string host, int port, CancellationToken ct)
     {
-        if (mode == ModeFragile)
+        if (mode == ModeFragile || mode == ModeKeepAliveNoAutostart)
         {
+            // keep-alive-no-autostart must not leave persistent OS jobs behind:
+            // minute tasks survive reboot/logon and effectively become autostart.
             await DeleteTaskIfExistsAsync(HookTaskName, ct);
             await DeleteTaskIfExistsAsync(KeepAliveTaskName, ct);
             await DeleteTaskIfExistsAsync(AutostartTaskName, ct);
@@ -111,8 +113,10 @@ public sealed class RuntimeSupervisorService
 
     private async Task ConfigureMacOsLaunchAgentsAsync(string mode, string host, int port, CancellationToken ct)
     {
-        if (mode == ModeFragile)
+        if (mode == ModeFragile || mode == ModeKeepAliveNoAutostart)
         {
+            // LaunchAgents with StartInterval can be loaded again by launchd after login.
+            // No-autostart mode removes them instead of keeping a persistent timer.
             await DeleteMacLaunchAgentAsync(MacHookLabel, ct);
             await DeleteMacLaunchAgentAsync(MacKeepAliveLabel, ct);
             await DeleteMacLaunchAgentAsync(MacAutostartLabel, ct);
@@ -126,12 +130,14 @@ public sealed class RuntimeSupervisorService
             BuildCommandParts("web-ui supervise --run-due", host, port),
             intervalSeconds: 60,
             autostart,
+            runAtLoad: !autostart,
             ct);
         await EnsureMacLaunchAgentAsync(
             MacKeepAliveLabel,
             BuildCommandParts("web-ui supervise --keep-alive", host, port),
             intervalSeconds: 300,
             autostart,
+            runAtLoad: !autostart,
             ct);
 
         if (autostart)
@@ -141,6 +147,7 @@ public sealed class RuntimeSupervisorService
                 BuildCommandParts("web-ui supervise --keep-alive", host, port),
                 intervalSeconds: null,
                 autostart: true,
+                runAtLoad: true,
                 ct);
         }
         else
@@ -396,24 +403,31 @@ public sealed class RuntimeSupervisorService
     private static string QuoteWindowsCommandArgument(string value)
         => "\"" + value.Replace("\"", "\\\"", StringComparison.Ordinal) + "\"";
 
-    private async Task EnsureMacLaunchAgentAsync(string label, IReadOnlyList<string> arguments, int? intervalSeconds, bool autostart, CancellationToken ct)
+    private async Task EnsureMacLaunchAgentAsync(string label, IReadOnlyList<string> arguments, int? intervalSeconds, bool autostart, bool runAtLoad, CancellationToken ct)
     {
         await DeleteMacLaunchAgentAsync(label, ct);
         var path = GetMacPlistPath(label, autostart);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         Directory.CreateDirectory(Path.Combine(MatdanceRuntime.RuntimeRoot, "logs"));
-        await File.WriteAllTextAsync(path, BuildMacLaunchAgentPlist(label, arguments, intervalSeconds), ct);
+        await File.WriteAllTextAsync(path, BuildMacLaunchAgentPlist(label, arguments, intervalSeconds, runAtLoad), ct);
+        await RunProcessAsync("chmod", $"644 {Quote(path)}", throwOnFailure: false, ct);
 
         var domain = await GetMacLaunchctlDomainAsync(ct);
+        var service = domain + "/" + label;
         var exit = await RunProcessAsync("launchctl", $"bootstrap {Quote(domain)} {Quote(path)}", throwOnFailure: false, ct);
         if (exit != 0)
             await RunProcessAsync("launchctl", $"load -w {Quote(path)}", throwOnFailure: true, ct);
+        await RunProcessAsync("launchctl", $"enable {Quote(service)}", throwOnFailure: false, ct);
+        if (runAtLoad || autostart)
+            await RunProcessAsync("launchctl", $"kickstart -k {Quote(service)}", throwOnFailure: false, ct);
     }
 
     private async Task DeleteMacLaunchAgentAsync(string label, CancellationToken ct)
     {
         var domain = await GetMacLaunchctlDomainAsync(ct);
-        await RunProcessAsync("launchctl", $"bootout {Quote(domain + "/" + label)}", throwOnFailure: false, ct);
+        var service = domain + "/" + label;
+        await RunProcessAsync("launchctl", $"disable {Quote(service)}", throwOnFailure: false, ct);
+        await RunProcessAsync("launchctl", $"bootout {Quote(service)}", throwOnFailure: false, ct);
         await RunProcessAsync("launchctl", $"remove {Quote(label)}", throwOnFailure: false, ct);
 
         foreach (var path in GetMacPlistPaths(label))
@@ -453,11 +467,12 @@ public sealed class RuntimeSupervisorService
         return Path.Combine(root, label + ".plist");
     }
 
-    private static string BuildMacLaunchAgentPlist(string label, IReadOnlyList<string> arguments, int? intervalSeconds)
+    private static string BuildMacLaunchAgentPlist(string label, IReadOnlyList<string> arguments, int? intervalSeconds, bool runAtLoad)
     {
         var logRoot = Path.Combine(MatdanceRuntime.RuntimeRoot, "logs");
         var stdout = Path.Combine(logRoot, label + ".out.log");
         var stderr = Path.Combine(logRoot, label + ".err.log");
+        var runAtLoadValue = runAtLoad ? "true" : "false";
         var interval = intervalSeconds.HasValue
             ? $"  <key>StartInterval</key>\n  <integer>{intervalSeconds.Value}</integer>\n"
             : string.Empty;
@@ -475,8 +490,10 @@ public sealed class RuntimeSupervisorService
   </array>
   <key>WorkingDirectory</key>
   <string>{XmlEscape(Directory.GetCurrentDirectory())}</string>
+  <key>LimitLoadToSessionType</key>
+  <string>Aqua</string>
   <key>RunAtLoad</key>
-  <true/>
+  <{runAtLoadValue}/>
 {interval}  <key>StandardOutPath</key>
   <string>{XmlEscape(stdout)}</string>
   <key>StandardErrorPath</key>

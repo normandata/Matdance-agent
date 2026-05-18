@@ -7,6 +7,8 @@ namespace Matdance.Cli.Services;
 
 public class SkillService
 {
+    public const int MaxSkillContentChars = 40000;
+    public const int MaxSkillDescriptionChars = 2000;
     private readonly PathService _path;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
 
@@ -20,6 +22,8 @@ public class SkillService
         var agentPath = _path.GetAgentPath(agentName);
         if (!Directory.Exists(agentPath))
             throw new InvalidOperationException($"Agent '{agentName}' does not exist.");
+
+        ValidateSkillPayload(request.Name, request.Description, request.Content);
 
         var id = GenerateSkillId(request.Name);
         var skillDir = _path.GetSkillPath(agentName, id);
@@ -66,6 +70,8 @@ public class SkillService
             skill.Tags = request.Tags.Select(t => t.Trim().ToLowerInvariant()).ToList();
         if (request.Content != null)
             skill.Content = request.Content;
+
+        ValidateSkillPayload(skill.Name, skill.Description, skill.Content);
 
         skill.UpdatedAt = UserTimeZoneService.Now();
         SaveSkill(skillDir, skill);
@@ -137,6 +143,18 @@ public class SkillService
         if (string.IsNullOrEmpty(safe))
             safe = "skill";
         return $"{safe}_{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}";
+    }
+
+    private static void ValidateSkillPayload(string? name, string? description, string? content)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+            throw new ArgumentException("Skill name is required.");
+
+        if ((description ?? string.Empty).Length > MaxSkillDescriptionChars)
+            throw new ArgumentException($"Skill description is over limit: {(description ?? string.Empty).Length} chars > {MaxSkillDescriptionChars}.");
+
+        if ((content ?? string.Empty).Length > MaxSkillContentChars)
+            throw new ArgumentException($"Skill content is over limit: {(content ?? string.Empty).Length} chars > {MaxSkillContentChars}. Split the skill by scope or move long reusable material into skill-local resource files.");
     }
 
     private static void SaveSkill(string skillDir, SkillItem skill)

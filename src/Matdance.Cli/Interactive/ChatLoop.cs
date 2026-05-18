@@ -150,6 +150,7 @@ public class ChatLoop
 
     private async Task ProcessUserInputAsync(string input, CancellationToken ct)
     {
+        _sessionState.ClearTraceLocks();
         _sessionData.TotalMessages++;
         ChatRenderer.RenderUserMessage(input);
 
@@ -193,6 +194,7 @@ public class ChatLoop
             while (hasToolCalls && loop < maxLoops)
             {
                 loop++;
+                PromptBuilder.UpsertLiveFileLocksSnapshot(messages, _sessionState);
                 var assistantMsg = await CallLlmAsync(messages, tools, ct, enableThinking: false);
                 var hasCurrentToolCalls = assistantMsg.ToolCalls != null && assistantMsg.ToolCalls.Count > 0;
                 if (!hasCurrentToolCalls && !thinkingToolNoticeSent && LlmResponseGuard.HasTextualToolRequestInThinking(assistantMsg))
@@ -270,6 +272,7 @@ public class ChatLoop
         }
 
         _sessionData.LastActivity = UserTimeZoneService.Now();
+        _sessionState.ClearTraceLocks();
         SaveState();
         ChatRenderer.RenderStatusBar(_sessionData, _sessionState, _config);
     }

@@ -7,6 +7,7 @@ namespace Matdance.Cli.Interactive;
 public sealed class MainMenu
 {
     private const string DefaultHost = "localhost";
+    private const string PublicHost = "0.0.0.0";
     private const int DefaultPort = 8765;
 
     private readonly PathService _path;
@@ -98,6 +99,7 @@ public sealed class MainMenu
                         text.DisableSupervisor,
                         text.RunSupervisorHook,
                         text.StopAll,
+                        PublicWebRuntimeMenuChoice(),
                         text.Back));
 
             try
@@ -122,6 +124,68 @@ public sealed class MainMenu
                     await RunSupervisorHookAsync(ct);
                 else if (choice.StartsWith("10.", StringComparison.Ordinal))
                     await StopAllAsync(ct);
+                else if (choice.StartsWith("11.", StringComparison.Ordinal))
+                {
+                    await RunPublicWebRuntimeMenuAsync(ct);
+                    continue;
+                }
+                else
+                    return;
+            }
+            catch (Exception ex)
+            {
+                AnsiConsole.MarkupLine("[red]Error:[/] " + ex.Message.EscapeMarkup());
+            }
+
+            WaitForContinue();
+        }
+    }
+
+    private async Task RunPublicWebRuntimeMenuAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            await RenderHeaderAsync(ct);
+            var text = Text();
+            var choice = AnsiConsole.Prompt(
+                new SelectionPrompt<string>()
+                    .Title("[bold]" + PublicWebRuntimeTitle().EscapeMarkup() + "[/]")
+                    .PageSize(13)
+                    .AddChoices(
+                        text.WebStatus,
+                        text.StartFragile,
+                        text.StartKeepAlive,
+                        text.RestartPreserve,
+                        text.StopWeb,
+                        text.EnableAutostartKeepAlive,
+                        text.DisableAutostartKeepAlive,
+                        text.DisableSupervisor,
+                        text.RunSupervisorHook,
+                        text.StopAll,
+                        text.Back));
+
+            try
+            {
+                if (choice.StartsWith("1.", StringComparison.Ordinal))
+                    await ShowRuntimeStatusAsync(ct);
+                else if (choice.StartsWith("2.", StringComparison.Ordinal))
+                    await StartWebAsync(RuntimeSupervisorService.ModeFragile, PublicHost);
+                else if (choice.StartsWith("3.", StringComparison.Ordinal))
+                    await StartWebAsync(RuntimeSupervisorService.ModeKeepAliveNoAutostart, PublicHost);
+                else if (choice.StartsWith("4.", StringComparison.Ordinal))
+                    await RestartWebAsync(RuntimeSupervisorService.ModePreserve, PublicHost);
+                else if (choice.StartsWith("5.", StringComparison.Ordinal))
+                    await StopWebAsync();
+                else if (choice.StartsWith("6.", StringComparison.Ordinal))
+                    await EnableSupervisorAsync(RuntimeSupervisorService.ModeAutostartKeepAlive, PublicHost, ct);
+                else if (choice.StartsWith("7.", StringComparison.Ordinal))
+                    await EnableSupervisorAsync(RuntimeSupervisorService.ModeKeepAliveNoAutostart, PublicHost, ct);
+                else if (choice.StartsWith("8.", StringComparison.Ordinal))
+                    await EnableSupervisorAsync(RuntimeSupervisorService.ModeFragile, PublicHost, ct);
+                else if (choice.StartsWith("9.", StringComparison.Ordinal))
+                    await RunSupervisorHookAsync(PublicHost, ct);
+                else if (choice.StartsWith("10.", StringComparison.Ordinal))
+                    await StopAllAsync(PublicHost, ct);
                 else
                     return;
             }
@@ -177,11 +241,13 @@ public sealed class MainMenu
         var source = AnsiConsole.Prompt(
             new SelectionPrompt<string>()
                 .Title("[bold]" + text.DownloadSource.EscapeMarkup() + "[/]")
-                .AddChoices(text.CnSource, text.GlobalSource));
+                .AddChoices(text.AutoSource, text.CnSource, text.GlobalSource));
 
-        var selected = source.Contains("CN", StringComparison.OrdinalIgnoreCase)
+        var selected = source == text.CnSource
             ? DependencySource.Cn
-            : DependencySource.Global;
+            : source == text.GlobalSource
+                ? DependencySource.Global
+                : DependencySource.Auto;
 
         AnsiConsole.MarkupLine("[cyan]" + text.InstallingDeps.EscapeMarkup() + "[/]");
         await _dependencies.InstallAsync(selected, line =>
@@ -200,10 +266,11 @@ public sealed class MainMenu
         AnsiConsole.MarkupLine("[dim]" + $"hook:{OnOff(status.HookEnabled)} keep:{OnOff(status.KeepAliveEnabled)} boot:{OnOff(status.AutostartEnabled)}".EscapeMarkup() + "[/]");
     }
 
-    private async Task StartWebAsync(string mode)
+    private async Task StartWebAsync(string mode, string host = DefaultHost)
     {
-        var status = await _supervisor.StartAsync(mode, DefaultHost, DefaultPort);
+        var status = await _supervisor.StartAsync(mode, host, DefaultPort);
         RenderWebStatus(status, Text().Started);
+        PrintWebAuthStartupHint(host);
     }
 
     private async Task StopWebAsync()
@@ -212,30 +279,48 @@ public sealed class MainMenu
         AnsiConsole.MarkupLine("[green]" + Text().WebStoppedSentence.EscapeMarkup() + "[/]");
     }
 
-    private async Task RestartWebAsync(string mode)
+    private async Task RestartWebAsync(string mode, string host = DefaultHost)
     {
-        var status = await _supervisor.RestartAsync(mode, DefaultHost, DefaultPort);
+        var status = await _supervisor.RestartAsync(mode, host, DefaultPort);
         RenderWebStatus(status, Text().Restarted);
+        PrintWebAuthStartupHint(host);
     }
 
     private async Task EnableSupervisorAsync(string mode, CancellationToken ct)
     {
-        await _supervisor.ConfigureSystemTasksAsync(mode, DefaultHost, DefaultPort, ct);
+        await EnableSupervisorAsync(mode, DefaultHost, ct);
+    }
+
+    private async Task EnableSupervisorAsync(string mode, string host, CancellationToken ct)
+    {
+        await _supervisor.ConfigureSystemTasksAsync(mode, host, DefaultPort, ct);
         var status = await _supervisor.GetSupervisorStatusAsync(ct);
         AnsiConsole.MarkupLine("[green]" + string.Format(Text().SupervisorUpdated, ModeLabel(status.Mode)).EscapeMarkup() + "[/]");
         AnsiConsole.MarkupLine("[dim]" + $"hook:{OnOff(status.HookEnabled)} keep:{OnOff(status.KeepAliveEnabled)} boot:{OnOff(status.AutostartEnabled)}".EscapeMarkup() + "[/]");
+        PrintWebAuthStartupHint(host);
     }
 
     private async Task RunSupervisorHookAsync(CancellationToken ct)
     {
-        var result = await _supervisor.SuperviseAsync(keepAlive: false, runDue: true, DefaultHost, DefaultPort, ct);
+        await RunSupervisorHookAsync(DefaultHost, ct);
+    }
+
+    private async Task RunSupervisorHookAsync(string host, CancellationToken ct)
+    {
+        var result = await _supervisor.SuperviseAsync(keepAlive: false, runDue: true, host, DefaultPort, ct);
         AnsiConsole.MarkupLine("[green]" + string.Format(Text().SupervisorHookDone, result.DueRun.DueCount, result.DueRun.Ran, result.DueRun.Skipped).EscapeMarkup() + "[/]");
         RenderWebStatus(result.WebUi, Text().StatusLabel);
+        PrintWebAuthStartupHint(host);
     }
 
     private async Task StopAllAsync(CancellationToken ct)
     {
-        var status = await _supervisor.StopAllAsync(DefaultHost, DefaultPort, ct);
+        await StopAllAsync(DefaultHost, ct);
+    }
+
+    private async Task StopAllAsync(string host, CancellationToken ct)
+    {
+        var status = await _supervisor.StopAllAsync(host, DefaultPort, ct);
         AnsiConsole.MarkupLine("[green]" + Text().StoppedAll.EscapeMarkup() + "[/]");
         AnsiConsole.MarkupLine("[dim]" + $"hook:{OnOff(status.HookEnabled)} keep:{OnOff(status.KeepAliveEnabled)} boot:{OnOff(status.AutostartEnabled)}".EscapeMarkup() + "[/]");
     }
@@ -265,6 +350,33 @@ public sealed class MainMenu
         if (!string.IsNullOrWhiteSpace(status.Message))
             AnsiConsole.MarkupLine("[dim]" + status.Message.EscapeMarkup() + "[/]");
     }
+
+    private void PrintWebAuthStartupHint(string host)
+    {
+        if (!WebAuthService.IsRemoteBinding(host))
+            return;
+
+        var auth = WebAuthService.LoadOrCreate(host);
+        AnsiConsole.MarkupLine("[yellow]" + RemoteAuthEnabledText().EscapeMarkup() + "[/]");
+        if (!string.IsNullOrWhiteSpace(auth.TokenForLocalDisplay))
+            AnsiConsole.MarkupLine("[yellow]" + TokenLabelText().EscapeMarkup() + ":[/] " + auth.TokenForLocalDisplay.EscapeMarkup());
+        AnsiConsole.MarkupLine("[yellow]" + TokenFileLabelText().EscapeMarkup() + ":[/] " + WebAuthService.StatePath.EscapeMarkup());
+    }
+
+    private string PublicWebRuntimeMenuChoice()
+        => _language == MenuLanguage.Chinese ? "11. 公网 Web UI / 远程访问" : "11. Public Web UI / Remote access";
+
+    private string PublicWebRuntimeTitle()
+        => _language == MenuLanguage.Chinese ? "公网 Web UI / 远程访问" : "Public Web UI / Remote access";
+
+    private string RemoteAuthEnabledText()
+        => _language == MenuLanguage.Chinese ? "远程 Web UI 已启用单 token 鉴权。" : "Remote Web UI uses single-token authentication.";
+
+    private string TokenLabelText()
+        => _language == MenuLanguage.Chinese ? "Token" : "Token";
+
+    private string TokenFileLabelText()
+        => _language == MenuLanguage.Chinese ? "Token 文件" : "Token file";
 
     private void WaitForContinue()
     {
@@ -357,6 +469,7 @@ public sealed class MainMenu
         string Language,
         string LanguageName,
         string DownloadSource,
+        string AutoSource,
         string CnSource,
         string GlobalSource,
         string InstallingDeps,
@@ -409,6 +522,7 @@ public sealed class MainMenu
             "语言",
             "中文",
             "下载源",
+            "自动（按地区/语言）",
             "CN 下载优化",
             "Global 官方源",
             "正在安装依赖...",
@@ -461,6 +575,7 @@ public sealed class MainMenu
             "Language",
             "English",
             "Download source",
+            "Auto (region/language)",
             "CN mirror",
             "Global official source",
             "Installing dependencies...",

@@ -17,10 +17,25 @@ public partial class ToolExecutor
     private readonly bool _allowInteractiveConfirmation;
     private readonly string? _sessionId;
     private readonly BackgroundWorkCoordinator? _backgroundWork;
+    private readonly bool _synchronousImageGeneration;
     private static readonly BrowserService _browser = BrowserService.Instance;
     private const int DefaultShellTimeoutSeconds = 30;
     private const int LongRunningShellTimeoutSeconds = 12;
     private const int MaxShellTimeoutSeconds = 120;
+    private const int MaxFileSearchFiles = 250;
+    private const int MaxFileSearchBytes = 2_000_000;
+    private const int MaxAgentFileReadBytes = 5_000_000;
+    private const int MaxAgentFileWriteBytes = 5_000_000;
+    private const int FileTraceToolBudgetSeconds = 12;
+    private static readonly string[] VisualImageFileExtensions =
+    {
+        ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".ico", ".tif", ".tiff", ".avif", ".heic", ".heif"
+    };
+    private static readonly TimeSpan DefaultToolExecutionTimeout = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan FileToolExecutionTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan BrowserToolExecutionTimeout = TimeSpan.FromMinutes(3);
+    private static readonly TimeSpan LongBackgroundToolExecutionTimeout = TimeSpan.FromMinutes(30);
+    private static readonly TimeSpan FileSearchTimeBudget = TimeSpan.FromSeconds(8);
     private static readonly string[] PrivateShellVariableNames =
     {
         "userprofile", "home", "homedrive", "homepath", "homeshare",
@@ -29,7 +44,7 @@ public partial class ToolExecutor
         "desktop", "documents", "downloads", "pictures", "music", "videos"
     };
 
-    public ToolExecutor(string agentName, PathService path, SessionState state, bool allowInteractiveConfirmation = true, string? sessionId = null, BackgroundWorkCoordinator? backgroundWork = null)
+    public ToolExecutor(string agentName, PathService path, SessionState state, bool allowInteractiveConfirmation = true, string? sessionId = null, BackgroundWorkCoordinator? backgroundWork = null, bool synchronousImageGeneration = false)
     {
         _agentName = agentName;
         _path = path;
@@ -37,9 +52,10 @@ public partial class ToolExecutor
         _allowInteractiveConfirmation = allowInteractiveConfirmation;
         _sessionId = sessionId;
         _backgroundWork = backgroundWork;
+        _synchronousImageGeneration = synchronousImageGeneration;
     }
 
-    public async Task<string> ExecuteAsync(ToolCall toolCall)
+    public async Task<string> ExecuteAsync(ToolCall toolCall, CancellationToken ct = default)
     {
         var fn = toolCall.Function;
         Dictionary<string, JsonElement> args;
@@ -53,48 +69,22 @@ public partial class ToolExecutor
             return $"[error] Invalid JSON arguments for tool '{fn.Name}'. The model emitted incomplete or malformed tool parameters, so the tool was not executed. Details: {ex.Message} Args preview: {preview}";
         }
 
+        var toolTimeout = GetToolExecutionTimeout(fn.Name);
+        using var toolCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var toolTask = Task.Run(() => ExecuteToolCoreAsync(fn.Name, args, toolCts.Token), toolCts.Token);
         try
         {
-            return fn.Name switch
-            {
-                "bash" => await ExecuteBashAsync(args),
-                "task_manager" => ExecuteTaskManager(args),
-                "memory_store" => ExecuteMemoryStore(args),
-                "memory_search" => ExecuteMemorySearch(args),
-                "file_read" => ExecuteFileRead(args),
-                "file_write" => ExecuteFileWrite(args),
-                "scheduled_task_create" => ExecuteScheduledTaskCreate(args),
-                "scheduled_task_edit" => ExecuteScheduledTaskEdit(args),
-                "scheduled_task_list" => ExecuteScheduledTaskList(args),
-                "scheduled_task_read" => ExecuteScheduledTaskRead(args),
-                "scheduled_task_do" => await ExecuteScheduledTaskDoAsync(args),
-                "scheduled_task_delete" => ExecuteScheduledTaskDelete(args),
-                "skill_create" => await ExecuteSkillCreateAsync(args),
-                "skill_read" => ExecuteSkillRead(args),
-                "skill_editor" => await ExecuteSkillEditorAsync(args),
-                "skill_delete" => await ExecuteSkillDeleteAsync(args),
-                "image_generation_list_profiles" => ExecuteImageGenerationListProfiles(),
-                "image_generation" => await ExecuteImageGenerationAsync(args),
-                "text_to_speech_list_profiles" => ExecuteTextToSpeechListProfiles(),
-                "text_to_speech" => await ExecuteTextToSpeechAsync(args),
-                "web_search_list_profiles" => ExecuteWebSearchListProfiles(),
-                "web_search" => await ExecuteWebSearchAsync(args),
-                "browser_navigate" => await ExecuteBrowserNavigateAsync(args),
-                "browser_click" => await ExecuteBrowserClickAsync(args),
-                "browser_type" => await ExecuteBrowserTypeAsync(args),
-                "browser_screenshot" => await ExecuteBrowserScreenshotAsync(args),
-                "browser_get_content" => await ExecuteBrowserGetContentAsync(args),
-                "browser_evaluate" => await ExecuteBrowserEvaluateAsync(args),
-                "browser_wait_for" => await ExecuteBrowserWaitForAsync(args),
-                "browser_query" => await ExecuteBrowserQueryAsync(args),
-                "browser_scroll" => await ExecuteBrowserScrollAsync(args),
-                "browser_inject_init_script" => await ExecuteBrowserInjectInitScriptAsync(args),
-                "save_cookie" or "browser_save_cookie" => await ExecuteBrowserSaveCookieAsync(args),
-                "list_cookie_by_site" or "browser_list_cookie_by_site" => await ExecuteBrowserListCookieBySiteAsync(args),
-                "apply_cookie" or "browser_apply_cookie" => await ExecuteBrowserApplyCookieAsync(args),
-                "browser_close" => await ExecuteBrowserCloseAsync(args),
-                _ => $"[error] Unknown tool: {fn.Name}"
-            };
+            return await toolTask.WaitAsync(toolTimeout, ct);
+        }
+        catch (TimeoutException)
+        {
+            toolCts.Cancel();
+            _ = toolTask.ContinueWith(t => { _ = t.Exception; }, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
+            return $"[error] Tool '{fn.Name}' timed out after {FormatDuration(toolTimeout)}. The call was stopped so the agent turn cannot hang forever. Retry with a narrower scope, smaller file/page range, shorter timeout, or ask the user to intervene.";
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            return $"[error] Tool '{fn.Name}' was cancelled.";
         }
         catch (Exception ex)
         {
@@ -102,7 +92,94 @@ public partial class ToolExecutor
         }
     }
 
-    private async Task<string> ExecuteBashAsync(Dictionary<string, JsonElement> args)
+    private async Task<string> ExecuteToolCoreAsync(string name, Dictionary<string, JsonElement> args, CancellationToken ct)
+    {
+        return name switch
+        {
+            "bash" => await ExecuteBashAsync(args, ct),
+            "task_manager" => ExecuteTaskManager(args),
+            "memory_store" => ExecuteMemoryStore(args),
+            "memory_search" => ExecuteMemorySearch(args),
+            "file_search" => ExecuteFileSearch(args),
+            "file_trace_open" => ExecuteFileTraceOpen(args),
+            "file_trace_show" => ExecuteFileTraceShow(args),
+            "file_trace_close" => ExecuteFileTraceClose(args),
+            "file_read" => ExecuteFileRead(args),
+            "file_write" => ExecuteFileWrite(args),
+            "file_write_locks" => ExecuteFileWriteLocks(args),
+            "file_write_lock_close" => ExecuteFileWriteLockClose(args),
+            "scheduled_task_create" => ExecuteScheduledTaskCreate(args),
+            "scheduled_task_edit" => ExecuteScheduledTaskEdit(args),
+            "scheduled_task_list" => ExecuteScheduledTaskList(args),
+            "scheduled_task_read" => ExecuteScheduledTaskRead(args),
+            "scheduled_task_do" => await ExecuteScheduledTaskDoAsync(args, ct),
+            "scheduled_task_delete" => ExecuteScheduledTaskDelete(args),
+            "skill_create" => await ExecuteSkillCreateAsync(args),
+            "skill_read" => ExecuteSkillRead(args),
+            "skill_editor" => await ExecuteSkillEditorAsync(args),
+            "skill_delete" => await ExecuteSkillDeleteAsync(args),
+            "image_generation_list_profiles" => ExecuteImageGenerationListProfiles(),
+            "image_generation" => await ExecuteImageGenerationAsync(args, ct),
+            "image_generation_show_process" => ExecuteImageGenerationShowProcess(args),
+            "image_generation_cancel" => ExecuteImageGenerationCancel(args),
+            "image_generation_retry" => ExecuteImageGenerationRetry(args),
+            "text_to_speech_list_profiles" => ExecuteTextToSpeechListProfiles(),
+            "text_to_speech" => await ExecuteTextToSpeechAsync(args, ct),
+            "web_search_list_profiles" => ExecuteWebSearchListProfiles(),
+            "web_search" => await ExecuteWebSearchAsync(args, ct),
+            "browser_navigate" => await ExecuteBrowserNavigateAsync(args, ct),
+            "browser_click" => await ExecuteBrowserClickAsync(args, ct),
+            "browser_type" => await ExecuteBrowserTypeAsync(args, ct),
+            "browser_screenshot" => await ExecuteBrowserScreenshotAsync(args, ct),
+            "browser_get_content" => await ExecuteBrowserGetContentAsync(args, ct),
+            "browser_evaluate" => await ExecuteBrowserEvaluateAsync(args, ct),
+            "browser_wait_for" => await ExecuteBrowserWaitForAsync(args, ct),
+            "browser_query" => await ExecuteBrowserQueryAsync(args, ct),
+            "browser_source_analyze" => await ExecuteBrowserSourceAnalyzeAsync(args, ct),
+            "browser_scroll" => await ExecuteBrowserScrollAsync(args, ct),
+            "browser_verify" => await ExecuteBrowserVerifyAsync(args, ct),
+            "browser_crawl" => await ExecuteBrowserCrawlAsync(args, ct),
+            "browser_trace" => await ExecuteBrowserTraceAsync(args, ct),
+            "browser_inject_init_script" => await ExecuteBrowserInjectInitScriptAsync(args, ct),
+            "save_cookie" or "browser_save_cookie" => await ExecuteBrowserSaveCookieAsync(args, ct),
+            "list_cookie_by_site" or "browser_list_cookie_by_site" => await ExecuteBrowserListCookieBySiteAsync(args, ct),
+            "apply_cookie" or "browser_apply_cookie" => await ExecuteBrowserApplyCookieAsync(args, ct),
+            "browser_close" => await ExecuteBrowserCloseAsync(args, ct),
+            _ => $"[error] Unknown tool: {name}"
+        };
+    }
+
+    private TimeSpan GetToolExecutionTimeout(string toolName)
+    {
+        if (toolName.Equals("bash", StringComparison.OrdinalIgnoreCase))
+            return TimeSpan.FromSeconds(MaxShellTimeoutSeconds + 15);
+        if (toolName.StartsWith("file_", StringComparison.OrdinalIgnoreCase))
+            return FileToolExecutionTimeout;
+        if (toolName.StartsWith("browser_", StringComparison.OrdinalIgnoreCase)
+            || toolName.Equals("save_cookie", StringComparison.OrdinalIgnoreCase)
+            || toolName.Equals("list_cookie_by_site", StringComparison.OrdinalIgnoreCase)
+            || toolName.Equals("apply_cookie", StringComparison.OrdinalIgnoreCase)
+            || toolName.Equals("browser_save_cookie", StringComparison.OrdinalIgnoreCase)
+            || toolName.Equals("browser_list_cookie_by_site", StringComparison.OrdinalIgnoreCase)
+            || toolName.Equals("browser_apply_cookie", StringComparison.OrdinalIgnoreCase))
+            return BrowserToolExecutionTimeout;
+        if (toolName.Equals("image_generation", StringComparison.OrdinalIgnoreCase)
+            || toolName.Equals("text_to_speech", StringComparison.OrdinalIgnoreCase)
+            || toolName.Equals("scheduled_task_do", StringComparison.OrdinalIgnoreCase))
+            return LongBackgroundToolExecutionTimeout;
+        if (toolName.Equals("web_search", StringComparison.OrdinalIgnoreCase))
+            return TimeSpan.FromMinutes(3);
+        return DefaultToolExecutionTimeout;
+    }
+
+    private static string FormatDuration(TimeSpan value)
+    {
+        return value.TotalMinutes >= 1
+            ? $"{value.TotalMinutes:0.#} minute(s)"
+            : $"{value.TotalSeconds:0.#} second(s)";
+    }
+
+    private async Task<string> ExecuteBashAsync(Dictionary<string, JsonElement> args, CancellationToken ct)
     {
         if (!args.TryGetValue("command", out var cmdEl) || cmdEl.ValueKind != JsonValueKind.String)
             return "[error] Missing required 'command' argument.";
@@ -162,12 +239,19 @@ public partial class ToolExecutor
         proc.BeginOutputReadLine();
         proc.BeginErrorReadLine();
 
-        var completed = await Task.Run(() => proc.WaitForExit(timeout * 1000));
+        var waitTask = proc.WaitForExitAsync(ct);
+        var completed = await Task.WhenAny(waitTask, Task.Delay(TimeSpan.FromSeconds(timeout), ct)) == waitTask;
+        if (ct.IsCancellationRequested)
+        {
+            try { proc.Kill(entireProcessTree: true); } catch { try { proc.Kill(); } catch { } }
+            ct.ThrowIfCancellationRequested();
+        }
         if (!completed)
         {
             try { proc.Kill(entireProcessTree: true); } catch { try { proc.Kill(); } catch { } }
             return $"[timeout] Command timed out after {timeout}s and the process tree was terminated. Do not keep foreground servers or watchers running inside bash; use a short bounded check or an external managed service.\nstdout:\n{stdout}\nstderr:\n{stderr}";
         }
+        await waitTask;
 
         var sb = new StringBuilder();
         sb.AppendLine($"exit_code: {proc.ExitCode}");
@@ -411,6 +495,260 @@ public partial class ToolExecutor
         return sb.ToString().Trim();
     }
 
+    private string ExecuteFileSearch(Dictionary<string, JsonElement> args)
+    {
+        var queries = GetStringList(args, "queries");
+        if (args.TryGetValue("query", out var queryEl) && queryEl.ValueKind == JsonValueKind.String)
+        {
+            var query = queryEl.GetString();
+            if (!string.IsNullOrWhiteSpace(query))
+                queries.Add(query!);
+        }
+        queries = queries.Where(q => !string.IsNullOrWhiteSpace(q)).Distinct(StringComparer.Ordinal).ToList();
+        if (queries.Count == 0)
+            return "[error] Missing 'query' or 'queries'.";
+
+        var requestedPaths = GetStringList(args, "paths");
+        if (requestedPaths.Count == 0)
+        {
+            var workspace = _path.GetWorkspacePath(_agentName);
+            var projects = Path.Combine(workspace, "projects");
+            requestedPaths.Add(Directory.Exists(projects) ? projects : workspace);
+        }
+
+        var regex = args.TryGetValue("regex", out var regexEl) && regexEl.ValueKind == JsonValueKind.True;
+        var caseSensitive = args.TryGetValue("case_sensitive", out var caseEl) && caseEl.ValueKind == JsonValueKind.True;
+        var maxMatches = Math.Clamp(GetInt(args, "max_matches", 80), 1, 300);
+        var before = Math.Clamp(GetInt(args, "before", 1), 0, 20);
+        var after = Math.Clamp(GetInt(args, "after", 1), 0, 20);
+        var regexOptions = caseSensitive ? RegexOptions.None : RegexOptions.IgnoreCase;
+        var regexQueries = new List<Regex>();
+        if (regex)
+        {
+            foreach (var query in queries)
+            {
+                try
+                {
+                    regexQueries.Add(new Regex(query, regexOptions, TimeSpan.FromMilliseconds(250)));
+                }
+                catch (ArgumentException ex)
+                {
+                    return $"[error] Invalid regular expression '{query}': {ex.Message}";
+                }
+            }
+        }
+
+        var deadline = DateTimeOffset.UtcNow + FileSearchTimeBudget;
+        var files = ResolveSearchFiles(requestedPaths, MaxFileSearchFiles, deadline);
+        var matches = new List<string>();
+        var searched = 0;
+        foreach (var file in files)
+        {
+            if (DateTimeOffset.UtcNow > deadline)
+                break;
+            if (matches.Count >= maxMatches)
+                break;
+            if (!LooksTextSearchable(file))
+                continue;
+
+            searched++;
+            string text;
+            try
+            {
+                text = File.ReadAllText(file);
+            }
+            catch
+            {
+                continue;
+            }
+
+            var lines = FileTraceLockService.SplitLines(text);
+            for (var i = 0; i < lines.Length && matches.Count < maxMatches; i++)
+            {
+                for (var queryIndex = 0; queryIndex < queries.Count; queryIndex++)
+                {
+                    var query = queries[queryIndex];
+                    bool hit;
+                    try
+                    {
+                        hit = regex
+                            ? regexQueries[queryIndex].IsMatch(lines[i])
+                            : lines[i].IndexOf(query, caseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase) >= 0;
+                    }
+                    catch (RegexMatchTimeoutException)
+                    {
+                        return $"[error] Regex search for '{query}' timed out on a line. Use a simpler regex or a literal query.";
+                    }
+                    if (!hit)
+                        continue;
+
+                    var start = Math.Max(1, i + 1 - before);
+                    var end = Math.Min(lines.Length, i + 1 + after);
+                    var snippet = RenderPlainLines(lines, start, end);
+                    matches.Add($"File: {file}\nQuery: {query}\nMatch line: L{i + 1}\n```\n{snippet}\n```");
+                    break;
+                }
+            }
+        }
+
+        var timedOut = DateTimeOffset.UtcNow > deadline;
+        if (matches.Count == 0)
+            return $"[file_search] No matches. searched_files={searched}, scanned_candidates={files.Count}, time_budget={FileSearchTimeBudget.TotalSeconds:F0}s{(timedOut ? ", stopped_by_time_budget=true" : "")}. Open a narrower trace/search path or adjust the query if needed.";
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"[file_search] Found {matches.Count} match(es) across {searched} searched file(s). scanned_candidates={files.Count}, time_budget={FileSearchTimeBudget.TotalSeconds:F0}s{(timedOut ? ", stopped_by_time_budget=true" : "")}. Search results are navigation hints only; open a read lock before relying on nearby content for edits.");
+        sb.AppendLine();
+        sb.AppendLine(string.Join("\n\n---\n\n", matches));
+        if (matches.Count >= maxMatches)
+            sb.AppendLine($"\n[truncated] max_matches={maxMatches}");
+        return sb.ToString().TrimEnd();
+    }
+
+    private string ExecuteFileTraceOpen(Dictionary<string, JsonElement> args)
+    {
+        var requests = ReadTraceOpenRequests(args);
+        if (requests.Count == 0)
+            return "[error] Missing file path. Provide path or locks[].";
+
+        var readLockCount = _state.TracedFiles.Count(IsReadLock);
+        if (readLockCount + requests.Count > FileTraceLockService.MaxReadLocks)
+            return $"[error] read_lock_limit_exceeded: {readLockCount} read lock(s) are already open and only {FileTraceLockService.MaxReadLocks} are allowed. Close unused read locks with file_trace_close before opening more.";
+
+        var resolvedRequests = new List<(TraceOpenRequest Request, string FullPath)>();
+        foreach (var request in requests)
+        {
+            var fullPath = ResolveWorkspacePath(request.Path, forWrite: false);
+            if (File.Exists(fullPath) && IsVisualImageFile(fullPath))
+                return VisualImageReadMessage("file_trace_open", request.Path, fullPath);
+            resolvedRequests.Add((request, fullPath));
+        }
+
+        var created = new List<TracedFileInfo>();
+        foreach (var (request, fullPath) in resolvedRequests)
+        {
+            var trace = FileTraceLockService.CreateReadLock(fullPath, request.StartLine, request.EndLine, request.Anchor, request.Mode, request.MaxLines);
+            if (string.Equals(trace.Status, "missing", StringComparison.OrdinalIgnoreCase))
+                return $"[error] File not found: {request.Path}";
+            _state.TracedFiles.Add(trace);
+            created.Add(trace);
+        }
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"[file_trace_open] Opened {created.Count} read lock(s). Read locks are live; use file_trace_show to refresh and file_trace_close when they are no longer useful.");
+        foreach (var trace in created)
+        {
+            sb.AppendLine();
+            sb.AppendLine(FileTraceLockService.DescribeLock(trace));
+        }
+        return sb.ToString().TrimEnd();
+    }
+
+    private string ExecuteFileTraceShow(Dictionary<string, JsonElement> args)
+    {
+        var ids = GetStringList(args, "ids");
+        var kind = GetString(args, "kind", "all").ToLowerInvariant();
+        var locks = _state.TracedFiles
+            .Where(t => ids.Count == 0 || ids.Contains(t.Id, StringComparer.OrdinalIgnoreCase))
+            .Where(t => kind == "all" || string.Equals(t.Kind, kind, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        if (locks.Count == 0)
+            return "[file_trace_show] No matching locks.";
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"[file_trace_show] Refreshed {locks.Count} live lock(s). These current lock views are more authoritative than older tool results or memory.");
+        var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(FileTraceToolBudgetSeconds);
+        foreach (var trace in locks)
+        {
+            if (DateTimeOffset.UtcNow > deadline)
+            {
+                sb.AppendLine();
+                sb.AppendLine($"[truncated] file_trace_show stopped after {FileTraceToolBudgetSeconds}s. Close unneeded locks or request ids for fewer locks.");
+                break;
+            }
+            sb.AppendLine();
+            sb.AppendLine(FileTraceLockService.DescribeLock(trace));
+        }
+        return sb.ToString().TrimEnd();
+    }
+
+    private string ExecuteFileTraceClose(Dictionary<string, JsonElement> args)
+    {
+        var ids = GetStringList(args, "ids");
+        var kind = GetString(args, "kind", "read").ToLowerInvariant();
+        string? fullPath = null;
+        if (args.TryGetValue("path", out var pathEl) && pathEl.ValueKind == JsonValueKind.String)
+            fullPath = ResolveWorkspacePath(pathEl.GetString() ?? "", forWrite: false);
+
+        if (ids.Count == 0 && string.IsNullOrWhiteSpace(fullPath))
+            return "[error] Provide ids or path so the tool does not close useful locks accidentally.";
+
+        var toClose = _state.TracedFiles
+            .Where(t => (kind == "all" || string.Equals(t.Kind, kind, StringComparison.OrdinalIgnoreCase))
+                && (ids.Count == 0 || ids.Contains(t.Id, StringComparer.OrdinalIgnoreCase))
+                && (fullPath == null || string.Equals(t.Path, fullPath, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+
+        foreach (var trace in toClose)
+            _state.TracedFiles.Remove(trace);
+
+        return toClose.Count == 0
+            ? "[file_trace_close] No matching locks were open."
+            : $"[file_trace_close] Closed {toClose.Count} lock(s): {string.Join(", ", toClose.Select(t => t.Id))}.";
+    }
+
+    private string ExecuteFileWriteLocks(Dictionary<string, JsonElement> args)
+    {
+        var ids = GetStringList(args, "ids");
+        var locks = _state.TracedFiles
+            .Where(IsWriteLock)
+            .Where(t => ids.Count == 0 || ids.Contains(t.Id, StringComparer.OrdinalIgnoreCase))
+            .ToList();
+
+        if (locks.Count == 0)
+            return "[file_write_locks] No matching write locks.";
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"[file_write_locks] Refreshed {locks.Count} write lock(s). Verify changed regions here before continuing or closing locks.");
+        var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(FileTraceToolBudgetSeconds);
+        foreach (var trace in locks)
+        {
+            if (DateTimeOffset.UtcNow > deadline)
+            {
+                sb.AppendLine();
+                sb.AppendLine($"[truncated] file_write_locks stopped after {FileTraceToolBudgetSeconds}s. Request ids for fewer locks or close verified locks.");
+                break;
+            }
+            sb.AppendLine();
+            sb.AppendLine(FileTraceLockService.DescribeLock(trace));
+        }
+        return sb.ToString().TrimEnd();
+    }
+
+    private string ExecuteFileWriteLockClose(Dictionary<string, JsonElement> args)
+    {
+        var ids = GetStringList(args, "ids");
+        string? fullPath = null;
+        if (args.TryGetValue("path", out var pathEl) && pathEl.ValueKind == JsonValueKind.String)
+            fullPath = ResolveWorkspacePath(pathEl.GetString() ?? "", forWrite: false);
+
+        if (ids.Count == 0 && string.IsNullOrWhiteSpace(fullPath))
+            return "[error] Provide ids or path so the tool does not close useful write locks accidentally.";
+
+        var toClose = _state.TracedFiles
+            .Where(IsWriteLock)
+            .Where(t => ids.Count == 0 || ids.Contains(t.Id, StringComparer.OrdinalIgnoreCase))
+            .Where(t => fullPath == null || string.Equals(t.Path, fullPath, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        foreach (var trace in toClose)
+            _state.TracedFiles.Remove(trace);
+
+        return toClose.Count == 0
+            ? "[file_write_lock_close] No matching write locks were open."
+            : $"[file_write_lock_close] Closed {toClose.Count} write lock(s): {string.Join(", ", toClose.Select(t => t.Id))}.";
+    }
+
     private string ExecuteFileRead(Dictionary<string, JsonElement> args)
     {
         if (!args.TryGetValue("path", out var pathEl) || pathEl.ValueKind != JsonValueKind.String)
@@ -423,7 +761,7 @@ public partial class ToolExecutor
 
         if (untrace)
         {
-            var existing = _state.TracedFiles.FirstOrDefault(t => t.Path == fullPath);
+            var existing = _state.TracedFiles.FirstOrDefault(t => IsReadLock(t) && t.Path == fullPath);
             if (existing != null)
             {
                 _state.TracedFiles.Remove(existing);
@@ -434,60 +772,416 @@ public partial class ToolExecutor
 
         if (!File.Exists(fullPath))
             return $"[error] File not found: {filePath}";
+        if (IsVisualImageFile(fullPath))
+            return VisualImageReadMessage("file_read", filePath, fullPath);
+        if (new FileInfo(fullPath).Length > MaxAgentFileReadBytes)
+            return $"[error] File is larger than {MaxAgentFileReadBytes} bytes. Use file_search plus file_trace_open on a narrow range instead of legacy full file_read.";
 
         var content = File.ReadAllText(fullPath);
-        var traced = _state.TracedFiles.FirstOrDefault(t => t.Path == fullPath);
+        var traced = _state.TracedFiles.FirstOrDefault(t => IsReadLock(t) && t.Path == fullPath);
         if (traced != null)
         {
-            traced.Content = content;
-            traced.LastRead = UserTimeZoneService.Now();
+            traced.Mode = "full";
+            traced.StartLine = 1;
+            traced.MaxLines = FileTraceLockService.MaxReadLockLines;
+            traced.EndLine = Math.Min(FileTraceLockService.SplitLines(content).Length, traced.MaxLines);
+            FileTraceLockService.Refresh(traced);
         }
         else
         {
-            if (_state.TracedFiles.Count >= 3)
-                _state.TracedFiles.RemoveAt(0); // Remove oldest
-            _state.TracedFiles.Add(new TracedFileInfo
-            {
-                Path = fullPath,
-                Content = content,
-                LastRead = UserTimeZoneService.Now()
-            });
+            var readLocks = _state.TracedFiles.Where(IsReadLock).ToList();
+            if (readLocks.Count >= FileTraceLockService.MaxReadLocks)
+                _state.TracedFiles.Remove(readLocks[0]); // compatibility behavior for legacy file_read
+            _state.TracedFiles.Add(FileTraceLockService.CreateReadLock(fullPath, 1, FileTraceLockService.MaxReadLockLines, null, "full", FileTraceLockService.MaxReadLockLines));
         }
 
-        var limit = args.TryGetValue("limit", out var limitEl) && limitEl.ValueKind == JsonValueKind.Number ? limitEl.GetInt32() : 50000;
+        var limit = args.TryGetValue("limit", out var limitEl) && limitEl.ValueKind == JsonValueKind.Number ? Math.Clamp(limitEl.GetInt32(), 500, 50000) : 50000;
         var preview = content.Length > limit ? content[..limit] + "\n...[truncated]" : content;
-        return $"[file_read] {filePath} (resolved to {fullPath}, {content.Length} chars):\n```\n{preview}\n```";
+        return $"[file_read] {filePath} (resolved to {fullPath}, {content.Length} chars). Compatibility read trace is active; prefer file_trace_open/show for live window work.\n```\n{preview}\n```";
     }
+
+    private static bool IsVisualImageFile(string path)
+        => VisualImageFileExtensions.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase);
+
+    private static string VisualImageReadMessage(string toolName, string requestedPath, string fullPath)
+        => $"[{toolName}] {requestedPath} resolves to image file {fullPath}. Image reading is a visual-inspection task, not a binary/text dump. Do not inspect this file as code or raw bytes; use image pixels from the user's upload when available, show/request a visual preview, or ask the user to upload the image in a multimodal-capable turn.";
 
     private string ExecuteFileWrite(Dictionary<string, JsonElement> args)
     {
         if (!args.TryGetValue("path", out var pathEl) || pathEl.ValueKind != JsonValueKind.String)
             return "[error] Missing required 'path' argument.";
-        if (!args.TryGetValue("content", out var contentEl) || contentEl.ValueKind != JsonValueKind.String)
-            return "[error] Missing required 'content' argument.";
 
         var filePath = pathEl.GetString() ?? "";
-        var content = contentEl.GetString() ?? "";
+        var hasContent = args.TryGetValue("content", out var contentEl) && contentEl.ValueKind == JsonValueKind.String;
+        var content = hasContent ? contentEl.GetString() ?? "" : string.Empty;
         var append = args.TryGetValue("append", out var a) && a.ValueKind == JsonValueKind.True;
+        var hasExpected = args.TryGetValue("expected", out var expectedEl) && expectedEl.ValueKind == JsonValueKind.String;
+        var expected = hasExpected ? expectedEl.GetString() ?? "" : string.Empty;
+        var hasReplaceWith = args.TryGetValue("replace_with", out var replaceEl) && replaceEl.ValueKind == JsonValueKind.String;
+        var replaceWith = hasReplaceWith ? replaceEl.GetString() ?? "" : string.Empty;
+        var replaceAll = args.TryGetValue("replace_all", out var allEl) && allEl.ValueKind == JsonValueKind.True;
+
+        if (!hasContent && !(hasExpected && hasReplaceWith))
+            return "[error] Provide content for overwrite/append mode, or expected and replace_with for targeted replace mode.";
 
         var fullPath = ResolveWorkspacePath(filePath, forWrite: true);
         Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+        if (File.Exists(fullPath) && new FileInfo(fullPath).Length > MaxAgentFileWriteBytes)
+            return $"[error] Existing file is larger than {MaxAgentFileWriteBytes} bytes. Refuse full-file edit through file_write; split it or use a narrower purpose-built tool.";
 
-        if (append && File.Exists(fullPath))
-            File.AppendAllText(fullPath, content);
-        else
-            AtomicFile.WriteAllText(fullPath, content);
-
-        // Update traced file if exists
-        var traced = _state.TracedFiles.FirstOrDefault(t => t.Path == fullPath);
-        if (traced != null)
+        var before = File.Exists(fullPath) ? File.ReadAllText(fullPath) : string.Empty;
+        string after;
+        string operation;
+        int centerLine;
+        if (hasExpected && hasReplaceWith)
         {
-            traced.Content = File.ReadAllText(fullPath);
-            traced.LastRead = UserTimeZoneService.Now();
+            if (string.IsNullOrEmpty(expected))
+                return "[error] expected cannot be empty in targeted replace mode.";
+
+            var index = before.IndexOf(expected, StringComparison.Ordinal);
+            if (index < 0)
+                return "[error] expected text was not found. Refresh the relevant read/write lock or search again before editing.";
+
+            operation = replaceAll ? "replace_all" : "replace";
+            centerLine = LineNumberAtIndex(before, index);
+            after = replaceAll
+                ? before.Replace(expected, replaceWith, StringComparison.Ordinal)
+                : before.Remove(index, expected.Length).Insert(index, replaceWith);
+        }
+        else if (append)
+        {
+            operation = "append";
+            centerLine = Math.Max(1, FileTraceLockService.SplitLines(before).Length);
+            after = before + content;
+        }
+        else
+        {
+            operation = "overwrite";
+            after = content;
+            centerLine = FindFirstChangedLine(before, after);
         }
 
-        return $"[file_write] {(append ? "Appended to" : "Wrote")} {filePath} (resolved to {fullPath}, {content.Length} chars).";
+        var afterLineCount = Math.Max(1, FileTraceLockService.SplitLines(after).Length);
+        if (Encoding.UTF8.GetByteCount(after) > MaxAgentFileWriteBytes)
+            return $"[error] Resulting file would exceed {MaxAgentFileWriteBytes} bytes. Refuse write to prevent tool/output hangs.";
+        if (!CanCreateOrReuseWriteLock(fullPath, centerLine, afterLineCount, out var lockError))
+            return lockError;
+
+        AtomicFile.WriteAllText(fullPath, after);
+
+        foreach (var trace in _state.TracedFiles.Where(t => string.Equals(t.Path, fullPath, StringComparison.OrdinalIgnoreCase)).ToList())
+        {
+            FileTraceLockService.Refresh(trace);
+        }
+
+        var writeLock = OpenOrRefreshWriteLock(fullPath, centerLine, afterLineCount);
+        AddFileEditAudit(operation, fullPath, before, after, writeLock.Id);
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"[file_write] Succeeded: {operation} {filePath} (resolved to {fullPath}). Full diff was saved to session-state audit; verify using the live write lock below.");
+        sb.AppendLine();
+        sb.AppendLine(FileTraceLockService.DescribeLock(writeLock));
+        return sb.ToString().TrimEnd();
     }
+
+    private List<string> ResolveSearchFiles(List<string> requestedPaths, int maxFiles, DateTimeOffset deadline)
+    {
+        var files = new List<string>();
+        foreach (var requestedPath in requestedPaths)
+        {
+            if (files.Count >= maxFiles || DateTimeOffset.UtcNow > deadline)
+                break;
+
+            var fullPath = ResolveWorkspacePath(requestedPath, forWrite: false);
+            if (File.Exists(fullPath))
+            {
+                files.Add(fullPath);
+                continue;
+            }
+
+            if (!Directory.Exists(fullPath))
+                continue;
+
+            var options = new EnumerationOptions
+            {
+                RecurseSubdirectories = true,
+                IgnoreInaccessible = true,
+                AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.System | FileAttributes.Hidden
+            };
+
+            foreach (var file in Directory.EnumerateFiles(fullPath, "*", options))
+            {
+                if (files.Count >= maxFiles || DateTimeOffset.UtcNow > deadline)
+                    break;
+                try
+                {
+                    if (ShouldSkipSearchPath(file))
+                        continue;
+                    files.Add(ResolveWorkspacePath(file, forWrite: false));
+                }
+                catch
+                {
+                    // Skip files blocked by file-tool policy.
+                }
+            }
+        }
+        return files.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    private static bool LooksTextSearchable(string path)
+    {
+        try
+        {
+            var info = new FileInfo(path);
+            if (!info.Exists || info.Length > MaxFileSearchBytes)
+                return false;
+        }
+        catch
+        {
+            return false;
+        }
+
+        var ext = Path.GetExtension(path).ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(ext))
+            return true;
+        var binary = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".bmp", ".mp3", ".wav", ".ogg", ".mp4",
+            ".mov", ".avi", ".zip", ".7z", ".rar", ".pdf", ".dll", ".exe", ".pdb", ".db", ".sqlite"
+        };
+        return !binary.Contains(ext);
+    }
+
+    private static bool ShouldSkipSearchPath(string path)
+    {
+        var segments = path.Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries);
+        return segments.Any(segment => segment.Equals(".git", StringComparison.OrdinalIgnoreCase)
+            || segment.Equals("node_modules", StringComparison.OrdinalIgnoreCase)
+            || segment.Equals("bin", StringComparison.OrdinalIgnoreCase)
+            || segment.Equals("obj", StringComparison.OrdinalIgnoreCase)
+            || segment.Equals(".build_verify", StringComparison.OrdinalIgnoreCase)
+            || segment.Equals("generated", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string RenderPlainLines(string[] lines, int start, int end)
+    {
+        var width = Math.Max(1, end.ToString().Length);
+        var sb = new StringBuilder();
+        for (var lineNo = start; lineNo <= end && lineNo <= lines.Length; lineNo++)
+        {
+            sb.Append(lineNo.ToString().PadLeft(width));
+            sb.Append(" | ");
+            sb.AppendLine(lines[lineNo - 1]);
+        }
+        return sb.ToString().TrimEnd();
+    }
+
+    private List<TraceOpenRequest> ReadTraceOpenRequests(Dictionary<string, JsonElement> args)
+    {
+        var requests = new List<TraceOpenRequest>();
+        if (args.TryGetValue("locks", out var locksEl) && locksEl.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in locksEl.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.Object)
+                    continue;
+                var path = GetString(item, "path");
+                if (string.IsNullOrWhiteSpace(path))
+                    continue;
+                requests.Add(new TraceOpenRequest(
+                    path!,
+                    GetNullableInt(item, "start_line"),
+                    GetNullableInt(item, "end_line"),
+                    GetString(item, "anchor"),
+                    GetString(item, "mode"),
+                    GetNullableInt(item, "max_lines")));
+            }
+            return requests;
+        }
+
+        var singlePath = GetString(args, "path");
+        if (!string.IsNullOrWhiteSpace(singlePath))
+        {
+            requests.Add(new TraceOpenRequest(
+                singlePath!,
+                GetNullableInt(args, "start_line"),
+                GetNullableInt(args, "end_line"),
+                GetString(args, "anchor"),
+                GetString(args, "mode"),
+                GetNullableInt(args, "max_lines")));
+        }
+        return requests;
+    }
+
+    private bool CanCreateOrReuseWriteLock(string fullPath, int centerLine, int totalLines, out string error)
+    {
+        error = string.Empty;
+        if (FindReusableWriteLock(fullPath, centerLine, totalLines) != null)
+            return true;
+
+        var writeLockCount = _state.TracedFiles.Count(IsWriteLock);
+        if (writeLockCount < FileTraceLockService.MaxWriteLocks)
+            return true;
+
+        error = "[error] write_lock_limit_exceeded: 3 write locks are already open and this write would start a distant verification region. Close a verified write lock with file_write_lock_close before writing here.";
+        return false;
+    }
+
+    private TracedFileInfo OpenOrRefreshWriteLock(string fullPath, int centerLine, int totalLines)
+    {
+        var existing = FindReusableWriteLock(fullPath, centerLine, totalLines);
+        var (start, end) = FileTraceLockService.WriteWindow(totalLines, centerLine);
+        if (existing != null)
+        {
+            existing.StartLine = start;
+            existing.EndLine = end;
+            existing.CenterLine = Math.Clamp(centerLine, 1, Math.Max(1, totalLines));
+            existing.MaxLines = Math.Max(1, end - start + 1);
+            FileTraceLockService.Refresh(existing);
+            return existing;
+        }
+
+        var created = FileTraceLockService.CreateWriteLock(fullPath, centerLine, totalLines);
+        _state.TracedFiles.Add(created);
+        return created;
+    }
+
+    private TracedFileInfo? FindReusableWriteLock(string fullPath, int centerLine, int totalLines)
+    {
+        var (newStart, newEnd) = FileTraceLockService.WriteWindow(totalLines, centerLine);
+        return _state.TracedFiles
+            .Where(IsWriteLock)
+            .Where(t => string.Equals(t.Path, fullPath, StringComparison.OrdinalIgnoreCase))
+            .FirstOrDefault(t => Math.Abs(t.CenterLine - centerLine) <= 50 || RangesOverlap(t.StartLine, t.EndLine, newStart, newEnd));
+    }
+
+    private static bool RangesOverlap(int aStart, int aEnd, int bStart, int bEnd)
+    {
+        return aStart <= bEnd && bStart <= aEnd;
+    }
+
+    private void AddFileEditAudit(string operation, string fullPath, string before, string after, string writeLockId)
+    {
+        _state.FileEditAudits.Add(new FileEditAuditInfo
+        {
+            Operation = operation,
+            Path = fullPath,
+            BeforeHash = FileTraceLockService.Sha256(before),
+            AfterHash = FileTraceLockService.Sha256(after),
+            Diff = BuildSimpleDiff(before, after),
+            WriteLockId = writeLockId,
+            Timestamp = UserTimeZoneService.Now()
+        });
+        if (_state.FileEditAudits.Count > 100)
+            _state.FileEditAudits.RemoveRange(0, _state.FileEditAudits.Count - 100);
+    }
+
+    private static string BuildSimpleDiff(string before, string after)
+    {
+        if (string.Equals(before, after, StringComparison.Ordinal))
+            return "(no textual changes)";
+
+        var oldLines = FileTraceLockService.SplitLines(before);
+        var newLines = FileTraceLockService.SplitLines(after);
+        var prefix = 0;
+        while (prefix < oldLines.Length && prefix < newLines.Length && string.Equals(oldLines[prefix], newLines[prefix], StringComparison.Ordinal))
+            prefix++;
+
+        var suffix = 0;
+        while (suffix < oldLines.Length - prefix
+            && suffix < newLines.Length - prefix
+            && string.Equals(oldLines[oldLines.Length - 1 - suffix], newLines[newLines.Length - 1 - suffix], StringComparison.Ordinal))
+        {
+            suffix++;
+        }
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"@@ changed old L{prefix + 1}-L{oldLines.Length - suffix} new L{prefix + 1}-L{newLines.Length - suffix} @@");
+        for (var i = prefix; i < oldLines.Length - suffix; i++)
+            sb.AppendLine("-" + oldLines[i]);
+        for (var i = prefix; i < newLines.Length - suffix; i++)
+            sb.AppendLine("+" + newLines[i]);
+        var diff = sb.ToString().TrimEnd();
+        return diff.Length > 40_000 ? diff[..40_000] + "\n...[diff truncated]" : diff;
+    }
+
+    private static int LineNumberAtIndex(string text, int index)
+    {
+        if (index <= 0)
+            return 1;
+        var line = 1;
+        for (var i = 0; i < Math.Min(index, text.Length); i++)
+        {
+            if (text[i] == '\n')
+                line++;
+        }
+        return line;
+    }
+
+    private static int FindFirstChangedLine(string before, string after)
+    {
+        var oldLines = FileTraceLockService.SplitLines(before);
+        var newLines = FileTraceLockService.SplitLines(after);
+        var max = Math.Min(oldLines.Length, newLines.Length);
+        for (var i = 0; i < max; i++)
+        {
+            if (!string.Equals(oldLines[i], newLines[i], StringComparison.Ordinal))
+                return i + 1;
+        }
+        return Math.Max(1, max + 1);
+    }
+
+    private static bool IsReadLock(TracedFileInfo trace)
+    {
+        return !string.Equals(trace.Kind, "write", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsWriteLock(TracedFileInfo trace)
+    {
+        return string.Equals(trace.Kind, "write", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static List<string> GetStringList(Dictionary<string, JsonElement> args, string name)
+    {
+        if (!args.TryGetValue(name, out var el) || el.ValueKind != JsonValueKind.Array)
+            return new List<string>();
+        return el.EnumerateArray()
+            .Where(item => item.ValueKind == JsonValueKind.String)
+            .Select(item => item.GetString() ?? string.Empty)
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .ToList();
+    }
+
+    private static string GetString(Dictionary<string, JsonElement> args, string name, string fallback = "")
+    {
+        return args.TryGetValue(name, out var el) && el.ValueKind == JsonValueKind.String
+            ? el.GetString() ?? fallback
+            : fallback;
+    }
+
+    private static int GetInt(Dictionary<string, JsonElement> args, string name, int fallback)
+    {
+        return args.TryGetValue(name, out var el) && el.ValueKind == JsonValueKind.Number && el.TryGetInt32(out var value)
+            ? value
+            : fallback;
+    }
+
+    private static string? GetString(JsonElement obj, string name)
+    {
+        return obj.TryGetProperty(name, out var el) && el.ValueKind == JsonValueKind.String ? el.GetString() : null;
+    }
+
+    private static int? GetNullableInt(Dictionary<string, JsonElement> args, string name)
+    {
+        return args.TryGetValue(name, out var el) && el.ValueKind == JsonValueKind.Number && el.TryGetInt32(out var value) ? value : null;
+    }
+
+    private static int? GetNullableInt(JsonElement obj, string name)
+    {
+        return obj.TryGetProperty(name, out var el) && el.ValueKind == JsonValueKind.Number && el.TryGetInt32(out var value) ? value : null;
+    }
+
+    private sealed record TraceOpenRequest(string Path, int? StartLine, int? EndLine, string? Anchor, string? Mode, int? MaxLines);
 
     private string ResolveWorkspacePath(string filePath, bool forWrite)
     {
@@ -833,13 +1527,14 @@ public partial class ToolExecutor
         return $"[image_generation_list_profiles] {profiles.Count} profile(s), {enabledCount} enabled, {usableCount} usable. Omit profile in image_generation to use the default/auto order.\n{json}";
     }
 
-    private async Task<string> ExecuteImageGenerationAsync(Dictionary<string, JsonElement> args)
+    private async Task<string> ExecuteImageGenerationAsync(Dictionary<string, JsonElement> args, CancellationToken ct)
     {
-        var client = new MultiModalClient(_path);
         var request = new ImageGenerationRequest
         {
             Agent = _agentName,
             ImageProfile = OptionalString(args, "profile"),
+            BatchId = OptionalString(args, "batch_id"),
+            Session = _sessionId,
             Prompt = RequiredString(args, "prompt"),
             Size = OptionalString(args, "size"),
             Quality = OptionalString(args, "quality"),
@@ -848,15 +1543,99 @@ public partial class ToolExecutor
             OutputPath = OptionalString(args, "output_path")
         };
 
-        var results = await client.GenerateImageAsync(_agentName, request);
-        var previews = string.Join(", ", results.Select(result => result.RelativePath));
-        var usedProfiles = string.Join(", ", results
-            .Select(result => result.ImageProfileName ?? result.ImageProfileId ?? result.Model)
-            .Where(value => !string.IsNullOrWhiteSpace(value))
-            .Distinct(StringComparer.OrdinalIgnoreCase));
-        var json = JsonSerializer.Serialize(results, new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true });
-        var profileNote = string.IsNullOrWhiteSpace(usedProfiles) ? "" : $" using {usedProfiles}";
-        return $"[image_generation] Generated {results.Count} image(s){profileNote}. Preview them for the user with {{show_file:{previews}}}.\n{json}";
+        if (_synchronousImageGeneration)
+        {
+            request.JobId = NewImageGenerationToolId("img");
+            request.BatchId = string.IsNullOrWhiteSpace(request.BatchId) ? NewImageGenerationToolId("batch") : request.BatchId;
+            var outcome = await new MultiModalClient(_path).GenerateImageDetailedAsync(_agentName, request, ct);
+            var outcomeJson = JsonSerializer.Serialize(outcome, new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true });
+            if (!outcome.Success)
+            {
+                return $"[image_generation] Synchronous image generation failed. Error category: {outcome.ErrorCategory ?? "unknown"}. No automatic retry was performed; decide the next step from the authoritative tool result.\n{outcomeJson}";
+            }
+
+            var previews = string.Join(", ", outcome.Results.Select(result => result.RelativePath));
+            var usedProfiles = string.Join(", ", outcome.Results
+                .Select(result => result.ImageProfileName ?? result.ImageProfileId ?? result.Model)
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Distinct(StringComparer.OrdinalIgnoreCase));
+            var fallback = outcome.FallbackOccurred ? " Provider fallback occurred." : "";
+            var profileNote = string.IsNullOrWhiteSpace(usedProfiles) ? "" : $" using {usedProfiles}";
+            return $"[image_generation] Synchronously generated {outcome.Results.Count} image(s){profileNote}.{fallback} Preview them for the user with {{show_file:{previews}}}.\n{outcomeJson}";
+        }
+
+        var job = new ImageGenerationJobService(_path).Start(_agentName, request, _sessionId);
+        var json = JsonSerializer.Serialize(job, new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true });
+        return $"[image_generation] Started asynchronous image generation job {job.JobId} in batch {job.BatchId}. Do other work while the host runs it; use image_generation_show_process(job_id='{job.JobId}') for authoritative status, final files, fallback details, and errors. Completion or failure will also be recorded by the host.\n{json}";
+    }
+
+    private static string NewImageGenerationToolId(string prefix)
+        => prefix + "_" + DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + "_" + Guid.NewGuid().ToString("N")[..8];
+
+    private string ExecuteImageGenerationShowProcess(Dictionary<string, JsonElement> args)
+    {
+        var service = new ImageGenerationJobService(_path);
+        var jobId = OptionalString(args, "job_id");
+        var batchId = OptionalString(args, "batch_id");
+        var take = IntArg(args, "take", 20);
+        var jobs = service.Query(_agentName, jobId, batchId, take);
+        var json = JsonSerializer.Serialize(new
+        {
+            authoritative = true,
+            count = jobs.Count,
+            jobs
+        }, new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true });
+
+        var previews = jobs
+            .SelectMany(job => job.Results)
+            .Select(result => result.RelativePath)
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var previewNote = previews.Count > 0
+            ? $"\nPreview successful files for the user with {{show_file:{string.Join(", ", previews)}}}."
+            : string.Empty;
+        return $"[image_generation_show_process] Authoritative host image-generation state.{previewNote}\n{json}";
+    }
+
+    private string ExecuteImageGenerationCancel(Dictionary<string, JsonElement> args)
+    {
+        var jobId = OptionalString(args, "job_id");
+        var batchId = OptionalString(args, "batch_id");
+        if (string.IsNullOrWhiteSpace(jobId) && string.IsNullOrWhiteSpace(batchId))
+            return "[error] Provide job_id or batch_id to cancel image generation jobs.";
+
+        var jobs = new ImageGenerationJobService(_path).Cancel(_agentName, jobId, batchId);
+        var json = JsonSerializer.Serialize(jobs, new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true });
+        return $"[image_generation_cancel] Cancellation requested for {jobs.Count} queued/running image generation job(s). Already generated files are preserved.\n{json}";
+    }
+
+    private string ExecuteImageGenerationRetry(Dictionary<string, JsonElement> args)
+    {
+        var service = new ImageGenerationJobService(_path);
+        var oldJob = service.Get(_agentName, RequiredString(args, "job_id"));
+        if (oldJob == null)
+            return "[error] Image generation job not found.";
+
+        var request = new ImageGenerationRequest
+        {
+            Agent = _agentName,
+            ImageProfile = OptionalString(args, "profile") ?? oldJob.RequestedProfile,
+            BatchId = OptionalString(args, "batch_id") ?? oldJob.BatchId,
+            Session = _sessionId ?? oldJob.Session,
+            Prompt = OptionalString(args, "prompt") ?? oldJob.Prompt,
+            Size = OptionalString(args, "size") ?? oldJob.Size,
+            Quality = OptionalString(args, "quality") ?? oldJob.Quality,
+            OutputFormat = OptionalString(args, "output_format") ?? oldJob.OutputFormat,
+            Count = IntArg(args, "count", oldJob.Count),
+            OutputPath = OptionalString(args, "output_path") ?? oldJob.OutputPath,
+            UseBrowserTemp = oldJob.UseBrowserTemp,
+            AllowProfileFallback = oldJob.AllowProfileFallback
+        };
+
+        var newJob = service.Start(_agentName, request, request.Session);
+        var json = JsonSerializer.Serialize(new { previousJob = oldJob.JobId, newJob }, new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true });
+        return $"[image_generation_retry] Started retry/replacement image generation job {newJob.JobId} in batch {newJob.BatchId}. Use image_generation_show_process(job_id='{newJob.JobId}') for authoritative status.\n{json}";
     }
 
     private string ExecuteTextToSpeechListProfiles()
@@ -902,7 +1681,7 @@ public partial class ToolExecutor
         return $"[text_to_speech_list_profiles] {profiles.Count} profile(s), {enabledCount} enabled, {usableCount} usable. Omit profile in text_to_speech to use the default/auto order.\n{json}";
     }
 
-    private async Task<string> ExecuteTextToSpeechAsync(Dictionary<string, JsonElement> args)
+    private async Task<string> ExecuteTextToSpeechAsync(Dictionary<string, JsonElement> args, CancellationToken ct)
     {
         var texts = new List<string>();
         var singleText = OptionalString(args, "text");
@@ -928,6 +1707,7 @@ public partial class ToolExecutor
         var results = new List<GeneratedFileResult>();
         for (var i = 0; i < texts.Count; i++)
         {
+            ct.ThrowIfCancellationRequested();
             var request = new TextToSpeechRequest
             {
                 Agent = _agentName,
@@ -938,7 +1718,7 @@ public partial class ToolExecutor
                 Format = OptionalString(args, "format"),
                 OutputPath = IndexedOutputPath(outputPath, i, texts.Count)
             };
-            results.Add(await client.TextToSpeechAsync(_agentName, request));
+            results.Add(await client.TextToSpeechAsync(_agentName, request, ct));
         }
 
         var previews = string.Join(", ", results.Select(result => result.RelativePath));
@@ -990,7 +1770,7 @@ public partial class ToolExecutor
         return $"[web_search_list_profiles] {profiles.Count} profile(s), {enabledCount} enabled, {usableCount} usable. Omit profile in web_search to use the default/auto order.\n{json}";
     }
 
-    private async Task<string> ExecuteWebSearchAsync(Dictionary<string, JsonElement> args)
+    private async Task<string> ExecuteWebSearchAsync(Dictionary<string, JsonElement> args, CancellationToken ct)
     {
         var client = new MultiModalClient(_path);
         var profile = OptionalString(args, "profile");
@@ -1003,7 +1783,7 @@ public partial class ToolExecutor
             MaxResults = args.TryGetValue("max_results", out var maxResults) && maxResults.ValueKind == JsonValueKind.Number ? maxResults.GetInt32() : null
         };
 
-        var result = await client.SearchAsync(_agentName, request);
+        var result = await client.SearchAsync(_agentName, request, ct);
         var json = JsonSerializer.Serialize(result, new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true });
         return $"[web_search] {result.Items.Count} result(s) from {result.SearchProfileName ?? result.Provider} for query: {result.Query}\n{json}";
     }
@@ -1028,56 +1808,56 @@ public partial class ToolExecutor
 
     #region Browser Tools
 
-    private async Task<string> ExecuteBrowserNavigateAsync(Dictionary<string, JsonElement> args)
+    private async Task<string> ExecuteBrowserNavigateAsync(Dictionary<string, JsonElement> args, CancellationToken ct)
     {
         var url = RequiredString(args, "url");
         var headless = BoolArg(args, "headless", true);
         var waitNetworkIdle = IntArg(args, "wait_network_idle", 0);
-        var ensureResult = await _browser.EnsureBrowserAsync(headless);
-        var navigateResult = await _browser.NavigateAsync(url, waitNetworkIdle);
+        var ensureResult = await _browser.EnsureBrowserAsync(headless, ct);
+        var navigateResult = await _browser.NavigateAsync(url, waitNetworkIdle, ct);
         return ensureResult.Contains("ignored", StringComparison.OrdinalIgnoreCase)
             ? ensureResult + "\n" + navigateResult
             : navigateResult;
     }
 
-    private async Task<string> ExecuteBrowserClickAsync(Dictionary<string, JsonElement> args)
+    private async Task<string> ExecuteBrowserClickAsync(Dictionary<string, JsonElement> args, CancellationToken ct)
     {
         var selector = RequiredString(args, "selector");
         var timeout = IntArg(args, "timeout", 5000);
-        return await _browser.ClickAsync(selector, timeout);
+        return await _browser.ClickAsync(selector, timeout, ct);
     }
 
-    private async Task<string> ExecuteBrowserTypeAsync(Dictionary<string, JsonElement> args)
+    private async Task<string> ExecuteBrowserTypeAsync(Dictionary<string, JsonElement> args, CancellationToken ct)
     {
         var selector = RequiredString(args, "selector");
         var text = RequiredString(args, "text");
         var submit = BoolArg(args, "submit", false);
         var timeout = IntArg(args, "timeout", 5000);
-        return await _browser.TypeAsync(selector, text, submit, timeout);
+        return await _browser.TypeAsync(selector, text, submit, timeout, ct);
     }
 
-    private async Task<string> ExecuteBrowserScreenshotAsync(Dictionary<string, JsonElement> args)
+    private async Task<string> ExecuteBrowserScreenshotAsync(Dictionary<string, JsonElement> args, CancellationToken ct)
     {
         var outputPath = OptionalString(args, "output_path");
         var fullPage = BoolArg(args, "full_page", false);
-        return await _browser.ScreenshotAsync(outputPath, fullPage);
+        return await _browser.ScreenshotAsync(outputPath, fullPage, ct);
     }
 
-    private async Task<string> ExecuteBrowserGetContentAsync(Dictionary<string, JsonElement> args)
+    private async Task<string> ExecuteBrowserGetContentAsync(Dictionary<string, JsonElement> args, CancellationToken ct)
     {
         var html = BoolArg(args, "html", false);
         var maxLength = IntArg(args, "max_length", 12000);
-        return await _browser.GetContentAsync(html, maxLength);
+        return await _browser.GetContentAsync(html, maxLength, ct);
     }
 
-    private async Task<string> ExecuteBrowserEvaluateAsync(Dictionary<string, JsonElement> args)
+    private async Task<string> ExecuteBrowserEvaluateAsync(Dictionary<string, JsonElement> args, CancellationToken ct)
     {
         var script = RequiredString(args, "script");
         var timeout = IntArg(args, "timeout", 8000);
-        return await _browser.EvaluateAsync(script, timeout);
+        return await _browser.EvaluateAsync(script, timeout, ct);
     }
 
-    private async Task<string> ExecuteBrowserWaitForAsync(Dictionary<string, JsonElement> args)
+    private async Task<string> ExecuteBrowserWaitForAsync(Dictionary<string, JsonElement> args, CancellationToken ct)
     {
         var kind = RequiredString(args, "kind");
         var selector = OptionalString(args, "selector");
@@ -1085,18 +1865,18 @@ public partial class ToolExecutor
         var state = OptionalString(args, "state");
         var regex = BoolArg(args, "regex", false);
         var timeout = IntArg(args, "timeout", 10000);
-        return await _browser.WaitForAsync(kind, selector, text, state, regex, timeout);
+        return await _browser.WaitForAsync(kind, selector, text, state, regex, timeout, ct);
     }
 
-    private async Task<string> ExecuteBrowserQueryAsync(Dictionary<string, JsonElement> args)
+    private async Task<string> ExecuteBrowserQueryAsync(Dictionary<string, JsonElement> args, CancellationToken ct)
     {
         var selector = OptionalString(args, "selector");
         var text = OptionalString(args, "text");
         var limit = IntArg(args, "limit", 30);
-        return await _browser.QueryAsync(selector, text, limit);
+        return await _browser.QueryAsync(selector, text, limit, ct);
     }
 
-    private async Task<string> ExecuteBrowserScrollAsync(Dictionary<string, JsonElement> args)
+    private async Task<string> ExecuteBrowserScrollAsync(Dictionary<string, JsonElement> args, CancellationToken ct)
     {
         var selector = OptionalString(args, "selector");
         var direction = OptionalString(args, "direction");
@@ -1105,37 +1885,77 @@ public partial class ToolExecutor
         var untilSelector = OptionalString(args, "until_selector");
         var untilText = OptionalString(args, "until_text");
         var delay = IntArg(args, "delay", 300);
-        return await _browser.ScrollAsync(selector, direction, pixels, steps, untilSelector, untilText, delay);
+        return await _browser.ScrollAsync(selector, direction, pixels, steps, untilSelector, untilText, delay, ct);
     }
 
-    private async Task<string> ExecuteBrowserInjectInitScriptAsync(Dictionary<string, JsonElement> args)
+    private async Task<string> ExecuteBrowserSourceAnalyzeAsync(Dictionary<string, JsonElement> args, CancellationToken ct)
+    {
+        var includeInline = BoolArg(args, "include_inline", false);
+        var limit = IntArg(args, "limit", 80);
+        return await _browser.SourceAnalyzeAsync(includeInline, limit, ct);
+    }
+
+    private async Task<string> ExecuteBrowserVerifyAsync(Dictionary<string, JsonElement> args, CancellationToken ct)
+    {
+        var kind = RequiredString(args, "kind");
+        var selector = OptionalString(args, "selector");
+        var text = OptionalString(args, "text");
+        var state = OptionalString(args, "state");
+        var regex = BoolArg(args, "regex", false);
+        var negate = BoolArg(args, "negate", false);
+        var timeout = IntArg(args, "timeout", 10000);
+        return await _browser.VerifyAsync(kind, selector, text, state, regex, negate, timeout, ct);
+    }
+
+    private async Task<string> ExecuteBrowserCrawlAsync(Dictionary<string, JsonElement> args, CancellationToken ct)
+    {
+        var startUrl = OptionalString(args, "start_url");
+        var maxPages = IntArg(args, "max_pages", 5);
+        var maxDepth = IntArg(args, "max_depth", 1);
+        var sameOrigin = BoolArg(args, "same_origin", true);
+        var maxChars = IntArg(args, "max_chars", 2000);
+        var restore = BoolArg(args, "restore", true);
+        return await _browser.CrawlAsync(startUrl, maxPages, maxDepth, sameOrigin, maxChars, restore, ct);
+    }
+
+    private async Task<string> ExecuteBrowserTraceAsync(Dictionary<string, JsonElement> args, CancellationToken ct)
+    {
+        var action = OptionalString(args, "action") ?? "read";
+        var network = BoolArg(args, "network", true);
+        var console = BoolArg(args, "console", true);
+        var maxEvents = IntArg(args, "max_events", 200);
+        var take = IntArg(args, "take", 80);
+        return await _browser.TraceAsync(action, network, console, maxEvents, take, ct);
+    }
+
+    private async Task<string> ExecuteBrowserInjectInitScriptAsync(Dictionary<string, JsonElement> args, CancellationToken ct)
     {
         var script = RequiredString(args, "script");
         var purpose = RequiredString(args, "purpose");
-        return await _browser.InjectInitScriptAsync(script, purpose);
+        return await _browser.InjectInitScriptAsync(script, purpose, ct);
     }
 
-    private async Task<string> ExecuteBrowserSaveCookieAsync(Dictionary<string, JsonElement> args)
+    private async Task<string> ExecuteBrowserSaveCookieAsync(Dictionary<string, JsonElement> args, CancellationToken ct)
     {
         var site = OptionalString(args, "site");
-        return await _browser.SaveCookiesAsync(_path.GetBrowserCookiesJsonPath(_agentName), site);
+        return await _browser.SaveCookiesAsync(_path.GetBrowserCookiesJsonPath(_agentName), site, ct);
     }
 
-    private async Task<string> ExecuteBrowserListCookieBySiteAsync(Dictionary<string, JsonElement> args)
+    private async Task<string> ExecuteBrowserListCookieBySiteAsync(Dictionary<string, JsonElement> args, CancellationToken ct)
     {
         var site = OptionalString(args, "site");
-        return await _browser.ListCookiesBySiteAsync(_path.GetBrowserCookiesJsonPath(_agentName), site);
+        return await _browser.ListCookiesBySiteAsync(_path.GetBrowserCookiesJsonPath(_agentName), site, ct);
     }
 
-    private async Task<string> ExecuteBrowserApplyCookieAsync(Dictionary<string, JsonElement> args)
+    private async Task<string> ExecuteBrowserApplyCookieAsync(Dictionary<string, JsonElement> args, CancellationToken ct)
     {
         var site = OptionalString(args, "site");
-        return await _browser.ApplyCookiesAsync(_path.GetBrowserCookiesJsonPath(_agentName), site);
+        return await _browser.ApplyCookiesAsync(_path.GetBrowserCookiesJsonPath(_agentName), site, ct);
     }
 
-    private async Task<string> ExecuteBrowserCloseAsync(Dictionary<string, JsonElement> args)
+    private async Task<string> ExecuteBrowserCloseAsync(Dictionary<string, JsonElement> args, CancellationToken ct)
     {
-        return await _browser.CloseAsync();
+        return await _browser.CloseAsync(ct: ct);
     }
 
     #endregion

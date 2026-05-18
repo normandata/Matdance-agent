@@ -16,6 +16,11 @@ public sealed class SkillMaintenanceService
     private const int MaxLearningSourceChars = 160000;
     private const int MaxLearningFileChars = 40000;
     private const int MaxLearningFiles = 40;
+    private const int MaxSkillSessionsPerStep = 1;
+    private const int MaxSkillSessionMessagesPerBatch = 40;
+    private const int MaxSkillMessageContentChars = 12000;
+    private const int MaxSkillToolArgumentsChars = 8000;
+    private const int MaxSkillResourceFileChars = 200000;
     private static readonly HashSet<string> AllowedSkillResourceRoots = new(StringComparer.OrdinalIgnoreCase)
     {
         "scripts",
@@ -165,30 +170,31 @@ public sealed class SkillMaintenanceService
             }
 
             // === 少量多次策略：每步只处理 1 个会话，但在本 job 内循环全部处理完 ===
-            const int maxSessionsPerStep = 1;
+            var batches = BuildSkillSessionBatches(sessions);
 
             int step = 0;
-            int totalSteps = (int)Math.Ceiling((double)sessions.Count / maxSessionsPerStep);
+            int totalSteps = batches.Count;
             var allResults = new List<SkillOrganizationResult>();
             var allApplied = new List<string>();
 
-            while (sessions.Count > 0)
+            while (batches.Count > 0)
             {
                 step++;
                 ct.ThrowIfCancellationRequested();
 
-                var stepSessions = sessions.Take(maxSessionsPerStep).ToList();
-                sessions = sessions.Skip(maxSessionsPerStep).ToList();
+                var stepBatches = batches.Take(MaxSkillSessionsPerStep).ToList();
+                batches = batches.Skip(MaxSkillSessionsPerStep).ToList();
 
                 // 每步重新获取最新技能列表（上一步可能已经创建了技能）
                 var existingSkills = skillService.List(job.Agent).Skills;
 
-                job.Stage = $"Step {step}/{totalSteps}: analyzing {stepSessions.Count} session(s), remaining {sessions.Count}.";
+                var stepMessageCount = stepBatches.Sum(batch => batch.Messages.Count);
+                job.Stage = $"Step {step}/{totalSteps}: analyzing {stepBatches.Count} session batch(es), {stepMessageCount} message(s), remaining {batches.Count}.";
                 job.Progress = (int)((step - 1) * 90.0 / totalSteps) + 5;
 
-                var messages = BuildOrganizationMessages(job.Agent, existingSkills, stepSessions);
+                var messages = BuildOrganizationMessages(job.Agent, existingSkills, stepBatches);
 
-                var response = await RunPlainSubagentAsync(job.Agent, messages, job, $"Skill extraction subagent analyzing (step {step}/{totalSteps})...", 40, ct);
+                var response = await RunSkillOrganizationSubagentAsync(job.Agent, messages, job, $"Skill extraction subagent analyzing (step {step}/{totalSteps})...", 40, ct);
 
                 job.Stage = $"Parsing skill extraction result (step {step}/{totalSteps})...";
                 job.Progress = (int)((step - 0.5) * 90.0 / totalSteps) + 5;
@@ -200,7 +206,7 @@ public sealed class SkillMaintenanceService
                 var applied = ApplyOrganizationResult(job.Agent, result, skillService);
                 allResults.Add(result);
                 allApplied.Add(applied);
-                foreach (var session in stepSessions)
+                foreach (var session in stepBatches.Where(batch => batch.CompletesSession))
                 {
                     if (session.Bookmark != null)
                         _bookmarks.UpdateSkillSessionBookmark(job.Agent, session.Bookmark);
@@ -210,9 +216,11 @@ public sealed class SkillMaintenanceService
             // 汇总所有步骤的报告
             var totalCreated = allResults.Sum(r => r.Skills?.Count(s => (s.Action ?? "").Trim().ToLowerInvariant() == "create") ?? 0);
             var totalUpdated = allResults.Sum(r => r.Skills?.Count(s => (s.Action ?? "").Trim().ToLowerInvariant() == "update") ?? 0);
+            var totalDeleted = allResults.Sum(r => r.Skills?.Count(s => (s.Action ?? "").Trim().ToLowerInvariant() == "delete") ?? 0)
+                + allResults.Sum(r => r.Skills?.Sum(s => s.SupersededIds?.Count ?? 0) ?? 0);
             var totalSkipped = allResults.Sum(r => r.Skills?.Count(s => (s.Action ?? "").Trim().ToLowerInvariant() == "skip") ?? 0);
 
-            job.ResultSummary = $"created={totalCreated}, updated={totalUpdated}, skipped={totalSkipped}";
+            job.ResultSummary = $"created={totalCreated}, updated={totalUpdated}, deleted={totalDeleted}, skipped={totalSkipped}";
             job.Report = BuildOrganizationReport(allResults, allApplied);
             job.Stage = "Skill organization completed.";
             job.Progress = 100;
@@ -694,6 +702,7 @@ public sealed class SkillMaintenanceService
             }
 
             Directory.CreateDirectory(Path.GetDirectoryName(resolvedPath)!);
+            ValidateSkillResourceContent(resource.Path, resource.Content);
             File.WriteAllText(resolvedPath, resource.Content);
             notes.Add($"Wrote resource `{ToSkillRelativePath(resolvedPath, normalizedSkillDir)}`.");
         }
@@ -737,11 +746,85 @@ public sealed class SkillMaintenanceService
         return await llm.SendAsync(messages, new List<ToolDefinition>(), _ => { }, ct,
             async (attempt, delay, error, token) =>
             {
-                job.Stage = $"Subagent retrying ({attempt})...";
-                await Task.Delay(delay, token);
+                job.Stage = $"Subagent retrying ({attempt}); next probe in {delay.TotalSeconds:F0}s.";
+                await Task.CompletedTask;
             },
             enableThinking: false);
     }
+
+    private async Task<ChatMessage> RunSkillOrganizationSubagentAsync(string agent, List<ChatMessage> messages, SkillJob job, string stage, int progress, CancellationToken ct)
+    {
+        var config = AgentConfig.Load(_path.GetAgentConfigJsonPath(agent));
+        var llm = new LlmClient(config);
+        var tools = ToolRegistry.GetAll(includeScheduledTaskTools: false)
+            .Where(t => t.Name is "skill_read")
+            .ToList();
+        var executor = new ToolExecutor(agent, _path, new SessionState(), allowInteractiveConfirmation: false);
+
+        job.Stage = stage;
+        job.Progress = progress;
+
+        ChatMessage? last = null;
+        var thinkingToolNoticeSent = false;
+        const int maxLoops = 18;
+        for (var loop = 1; loop <= maxLoops; loop++)
+        {
+            ct.ThrowIfCancellationRequested();
+            job.Stage = $"{stage} Reading relevant skills when needed ({loop}/{maxLoops})...";
+            var assistant = await llm.SendAsync(messages, tools, _ => { }, ct,
+                async (attempt, delay, error, token) =>
+                {
+                    job.Stage = $"Skill organization subagent retrying ({attempt}); next probe in {delay.TotalSeconds:F0}s.";
+                    await Task.CompletedTask;
+                },
+                enableThinking: false);
+
+            if ((assistant.ToolCalls == null || assistant.ToolCalls.Count == 0) && !thinkingToolNoticeSent && LlmResponseGuard.HasTextualToolRequestInThinking(assistant))
+            {
+                thinkingToolNoticeSent = true;
+                messages.Add(ChatMessage.User(LlmResponseGuard.ThinkingTextToolRequestNotice));
+                continue;
+            }
+
+            if (string.IsNullOrWhiteSpace(assistant.Content) && (assistant.ToolCalls == null || assistant.ToolCalls.Count == 0))
+                assistant.Content = "(no response)";
+
+            messages.Add(assistant);
+            last = assistant;
+
+            if (assistant.ToolCalls == null || assistant.ToolCalls.Count == 0)
+            {
+                if (HasStructuredOrganizationJson(assistant.Content))
+                    return assistant;
+                break;
+            }
+
+            foreach (var toolCall in assistant.ToolCalls)
+            {
+                var result = string.Equals(toolCall.Function.Name, "skill_read", StringComparison.OrdinalIgnoreCase)
+                    ? await executor.ExecuteAsync(toolCall, ct)
+                    : "[blocked] Skill organization mode allows only skill_read. Return structured JSON actions for create/update/delete/supersede; the host applies changes after validation.";
+                messages.Add(ChatMessage.Tool(toolCall.Id, result));
+            }
+        }
+
+        if (last == null)
+            throw new InvalidOperationException("Skill organization subagent did not respond.");
+
+        messages.Add(ChatMessage.User("Stop using tools. Based on the session evidence and the relevant skills you read with skill_read, return the required skill organization JSON only. Do not include Markdown fences or prose outside the JSON."));
+        last = await llm.SendAsync(messages, new List<ToolDefinition>(), _ => { }, ct,
+            async (attempt, delay, error, token) =>
+            {
+                job.Stage = $"Skill organization report generation retrying ({attempt}); next probe in {delay.TotalSeconds:F0}s.";
+                await Task.CompletedTask;
+            },
+            enableThinking: false);
+
+        return last;
+    }
+
+    private static bool HasStructuredOrganizationJson(string? content)
+        => DeserializeJsonFromResponse<SkillOrganizationResult>(content) != null;
 
     private async Task<ChatMessage> RunValidationSubagentAsync(string agent, List<ChatMessage> messages, SkillJob job, string skillDir, int progressStart, int progressEnd, CancellationToken ct)
     {
@@ -761,8 +844,8 @@ public sealed class SkillMaintenanceService
             var assistant = await llm.SendAsync(messages, tools, _ => { }, ct,
                 async (attempt, delay, error, token) =>
                 {
-                    job.Stage = $"Validation subagent retrying ({attempt})...";
-                    await Task.Delay(delay, token);
+                    job.Stage = $"Validation subagent retrying ({attempt}); next probe in {delay.TotalSeconds:F0}s.";
+                    await Task.CompletedTask;
                 },
                 enableThinking: false);
 
@@ -805,8 +888,8 @@ public sealed class SkillMaintenanceService
             last = await llm.SendAsync(messages, new List<ToolDefinition>(), _ => { }, ct,
                 async (attempt, delay, error, token) =>
                 {
-                    job.Stage = $"Validation report generation retrying ({attempt})...";
-                    await Task.Delay(delay, token);
+                    job.Stage = $"Validation report generation retrying ({attempt}); next probe in {delay.TotalSeconds:F0}s.";
+                    await Task.CompletedTask;
                 },
                 enableThinking: false);
         }
@@ -1059,18 +1142,27 @@ public sealed class SkillMaintenanceService
 
                 var statePath = _path.GetSessionStateJsonPath(agent, bookmark.SessionId);
                 var messages = new List<ChatMessage>();
+                var startIndex = 0;
+                var totalMessages = data.TotalMessages;
                 if (File.Exists(statePath))
                 {
                     var state = SessionState.Load(file);
-                    messages = state.Messages ?? new List<ChatMessage>();
+                    totalMessages = Math.Max(data.TotalMessages, state.Messages?.Count ?? 0);
+                    var selected = SelectMessagesForSkillOrganization(state.Messages ?? new List<ChatMessage>(), bookmark);
+                    messages = selected.Messages;
+                    startIndex = selected.StartIndex;
                 }
+
+                if (messages.Count == 0)
+                    continue;
 
                 sessions.Add(new SessionContext
                 {
                     SessionId = bookmark.SessionId,
                     LastActivity = UserTimeZoneService.ToUserTime(bookmark.EffectiveActivityAt ?? bookmark.LatestMessageAt ?? data.LastActivity),
-                    TotalMessages = Math.Max(data.TotalMessages, messages.Count),
+                    TotalMessages = totalMessages,
                     Messages = messages,
+                    StartIndex = startIndex,
                     Bookmark = bookmark
                 });
             }
@@ -1086,7 +1178,66 @@ public sealed class SkillMaintenanceService
             .ToList();
     }
 
-    private static List<ChatMessage> BuildOrganizationMessages(string agent, List<SkillSummary> existingSkills, List<SessionContext> sessions)
+    private static (List<ChatMessage> Messages, int StartIndex) SelectMessagesForSkillOrganization(List<ChatMessage> messages, SessionBookmark bookmark)
+    {
+        if (messages.Count == 0)
+            return (new List<ChatMessage>(), 0);
+
+        if (bookmark.NeedsReconcile || !bookmark.PreviousMessageCount.HasValue)
+            return (messages.ToList(), 0);
+
+        var previousCount = bookmark.PreviousMessageCount.Value;
+        if (previousCount < 0 || previousCount > messages.Count)
+            return (messages.ToList(), 0);
+
+        if (bookmark.MessageCount > previousCount)
+            return (messages.Skip(previousCount).ToList(), previousCount);
+
+        var firstAfterBookmark = messages.FindIndex(message =>
+            message.Timestamp.HasValue && IsAfter(message.Timestamp.Value, bookmark.LastIntegratedAt));
+        return firstAfterBookmark >= 0
+            ? (messages.Skip(firstAfterBookmark).ToList(), firstAfterBookmark)
+            : (new List<ChatMessage>(), messages.Count);
+    }
+
+    private static List<SkillSessionBatch> BuildSkillSessionBatches(List<SessionContext> sessions)
+    {
+        var batches = new List<SkillSessionBatch>();
+        foreach (var session in sessions)
+        {
+            for (var offset = 0; offset < session.Messages.Count; offset += MaxSkillSessionMessagesPerBatch)
+            {
+                var messages = session.Messages
+                    .Skip(offset)
+                    .Take(MaxSkillSessionMessagesPerBatch)
+                    .ToList();
+                if (messages.Count == 0)
+                    continue;
+
+                batches.Add(new SkillSessionBatch
+                {
+                    SessionId = session.SessionId,
+                    LastActivity = session.LastActivity,
+                    TotalMessages = session.TotalMessages,
+                    StartIndex = session.StartIndex + offset,
+                    Messages = messages,
+                    Bookmark = session.Bookmark,
+                    CompletesSession = offset + messages.Count >= session.Messages.Count
+                });
+            }
+        }
+
+        return batches;
+    }
+
+    private static bool IsAfter(DateTimeOffset left, DateTimeOffset right)
+    {
+        if (right == default || right == DateTimeOffset.MinValue)
+            return left != default && left != DateTimeOffset.MinValue;
+        return left.ToUniversalTime() > right.ToUniversalTime();
+    }
+
+    private static List<ChatMessage> BuildOrganizationMessages(string agent, List<SkillSummary> existingSkills, List<SkillSessionBatch> sessions)
     {
         var system = new StringBuilder();
         system.AppendLine("# Skill Extraction Subagent");
@@ -1099,7 +1250,15 @@ public sealed class SkillMaintenanceService
         system.AppendLine("Never create skills for private-data access, credential handling, cookie value extraction, authorization-file use, Matdance source modification, runtime-state editing, queue manipulation, or any workflow whose safety depends on exposing secrets.");
         system.AppendLine("Functional reusable assets are the priority: exact commands, scripts, package layouts, browser automation setup, tool arguments, validation steps, failure modes, and fastest known execution path. Guidance-only management notes are allowed only when no concrete reusable operation exists.");
         system.AppendLine("Look below the surface. If a conversation says to browse a forum thread, preserve not only the human-facing steps, but also the most efficient way to run it: browser automation strategy, selectors or navigation constraints if present, batching/caching, required tools, and expected outputs.");
-        system.AppendLine("Prefer updating an existing skill when the new knowledge clearly belongs there. Create a new skill only when it is independently reusable.");
+        system.AppendLine("You receive only the existing skill index, not full skill manuals. First use the index to identify plausibly related skills, then call `skill_read` only for skills that may overlap, conflict, or accept the new workflow. Do not read unrelated skills just to fill context.");
+        system.AppendLine("Prefer updating or merging into an existing skill when the new knowledge clearly belongs there. Create a new skill only when it is independently reusable.");
+        system.AppendLine("Merge skills only when all three dimensions are highly aligned: same platform family, same operating direction, and same practical scope. The merged skill must remain readable as one coherent package and must not lose concrete steps, code, selectors, commands, verification, failure modes, or tool arguments.");
+        system.AppendLine("Good merge examples: Xiaohongshu search plus Xiaohongshu crawl; Windows control of Soda Music plus Windows control of QQ Music; Windows music-app control plus Windows video-app playback control when both fit a coherent Windows audio/video app control skill.");
+        system.AppendLine("Bad merge example: AutoDL GPU-server control plus local Dify workflow output. Cross cloud/local, platform, direction, and professional scope boundaries must remain separate even if a larger story could connect them.");
+        system.AppendLine("Reading cost means maintenance structure, not deletion of detail. Keep details intact. Use `resource_files` under ./scripts/, ./templates/, ./examples/, or ./resources/ for scripts, templates, long examples, configs, and reusable code so skill.md can stay organized without becoming vague.");
+        system.AppendLine($"Keep each skill `content` under {SkillService.MaxSkillContentChars} characters. If the reusable knowledge cannot fit, split it into narrower skills by platform, direction, or scope instead of appending endlessly.");
+        system.AppendLine($"Keep each resource file under {MaxSkillResourceFileChars} characters. Very large examples or logs should be summarized into reusable procedure and source pointers, not copied whole.");
+        system.AppendLine("When merging, resolve conflicts explicitly, preserve the best verified details from each source, add missing resource files, and list superseded skill IDs so the host can delete obsolete duplicates after the merged skill is safely written.");
         system.AppendLine("You may create skill-local asset files through `resource_files` when the session evidence proves the asset is needed and its content is known. This includes scripts, templates, examples, config snippets, and reusable text resources.");
         system.AppendLine("If the skill content references a script, template, config, example, asset, or resource file that is not already guaranteed to exist inside the skill directory, you must include that file in `resource_files`. Do not leave missing-resource references for validation/repair to guess later.");
         system.AppendLine("Allowed resource paths are limited to skill-local relative paths under `./scripts/`, `./templates/`, `./resources/`, `./assets/`, `./examples/`, `./config/`, or `./configs/`. Do not return `skill.md`, absolute paths, workspace paths, Matdance runtime paths, or parent-directory traversal.");
@@ -1109,13 +1268,14 @@ public sealed class SkillMaintenanceService
         system.AppendLine("{");
         system.AppendLine("  \"summary\": \"what changed\",");
         system.AppendLine("  \"skills\": [");
-        system.AppendLine("    { \"action\": \"create|update|skip\", \"id\": \"existing skill id when updating\", \"name\": \"...\", \"description\": \"...\", \"tags\": [\"...\"], \"content\": \"full markdown skill content\", \"resource_files\": [{ \"path\": \"./scripts/example.py\", \"content\": \"...\" }], \"evidence\": [\"specific session/tool facts used\"] }");
+        system.AppendLine("    { \"action\": \"create|update|delete|skip\", \"id\": \"existing skill id when updating or deleting\", \"name\": \"...\", \"description\": \"...\", \"tags\": [\"...\"], \"content\": \"full markdown skill content\", \"superseded_ids\": [\"skill ids safely replaced by this create/update\"], \"resource_files\": [{ \"path\": \"./scripts/example.py\", \"content\": \"...\" }], \"evidence\": [\"specific session/tool facts used\"] }");
         system.AppendLine("  ]");
         system.AppendLine("}");
         system.AppendLine();
         system.AppendLine("Skill content must be actionable and self-contained. Include triggers, prerequisites, exact run procedure, reusable resources, constraints, verification, examples, and when not to use it.");
         system.AppendLine("If a skill requires a script/program/extension/template/config, include it in `resource_files` and reference it from the skill content with a skill-local relative path such as `./scripts/name.py`. A skill that points at a missing helper file is invalid.");
         system.AppendLine("The host provided complete session messages, including tool calls and tool results. Use those facts directly; do not invent missing commands or package names.");
+        system.AppendLine("The host will apply returned create/update/delete actions. Do not call edit/delete tools directly.");
 
         var context = new StringBuilder();
         context.AppendLine("## Existing Skills");
@@ -1134,9 +1294,9 @@ public sealed class SkillMaintenanceService
         foreach (var session in sessions)
         {
             context.AppendLine();
-            context.AppendLine($"### Session {session.SessionId} ({session.LastActivity:yyyy-MM-dd HH:mm zzz}, {session.TotalMessages} messages)");
+            context.AppendLine($"### Session {session.SessionId} ({session.LastActivity:yyyy-MM-dd HH:mm zzz}, messages {session.StartIndex + 1}-{session.StartIndex + session.Messages.Count} of {session.TotalMessages})");
             for (var index = 0; index < session.Messages.Count; index++)
-                AppendFullSkillMessage(context, index, session.Messages[index]);
+                AppendFullSkillMessage(context, session.StartIndex + index, session.Messages[index]);
         }
 
         return new List<ChatMessage>
@@ -1155,8 +1315,17 @@ public sealed class SkillMaintenanceService
             timestamp = message.Timestamp.HasValue ? UserTimeZoneService.ToUserTime(message.Timestamp.Value).ToString("O") : null,
             message_type = message.MessageType,
             tool_call_id = message.ToolCallId,
-            tool_calls = message.ToolCalls,
-            content = message.Content
+            tool_calls = message.ToolCalls?.Select(call => new
+            {
+                id = call.Id,
+                type = call.Type,
+                function = new
+                {
+                    name = call.Function.Name,
+                    arguments = Trim(call.Function.Arguments, MaxSkillToolArgumentsChars)
+                }
+            }).ToList(),
+            content = Trim(message.Content, MaxSkillMessageContentChars)
         };
         context.AppendLine(JsonSerializer.Serialize(payload, JsonOptions));
     }
@@ -1248,13 +1417,24 @@ public sealed class SkillMaintenanceService
         var created = 0;
         var updated = 0;
         var skipped = 0;
+        var deleted = 0;
         var resourcesWritten = 0;
+        var supersededToDelete = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var item in result.Skills ?? new List<SkillOrganizationItem>())
         {
             var action = (item.Action ?? "").Trim().ToLowerInvariant();
             if (action == "skip")
             {
                 skipped++;
+                continue;
+            }
+
+            if (action == "delete")
+            {
+                if (TryDeleteOrganizationSkill(agent, item.Id, skillService))
+                    deleted++;
+                else
+                    skipped++;
                 continue;
             }
 
@@ -1278,10 +1458,15 @@ public sealed class SkillMaintenanceService
                         Content = item.Content
                     });
                     resourcesWritten += WriteSkillOrganizationResources(item, _path.GetSkillPath(agent, skill.Id));
+                    foreach (var id in item.SupersededIds ?? new List<string>())
+                    {
+                        if (!string.Equals(id, skill.Id, StringComparison.OrdinalIgnoreCase))
+                            supersededToDelete.Add(id);
+                    }
                     updated++;
                     continue;
                 }
-                catch
+                catch (InvalidOperationException ex) when (ex.Message.Contains("not found", StringComparison.OrdinalIgnoreCase))
                 {
                     // Fall through to create if the referenced skill disappeared.
                 }
@@ -1296,10 +1481,37 @@ public sealed class SkillMaintenanceService
                 Content = item.Content
             });
             resourcesWritten += WriteSkillOrganizationResources(item, _path.GetSkillPath(agent, createdSkill.Id));
+            foreach (var id in item.SupersededIds ?? new List<string>())
+            {
+                if (!string.Equals(id, createdSkill.Id, StringComparison.OrdinalIgnoreCase))
+                    supersededToDelete.Add(id);
+            }
             created++;
         }
 
-        return $"created={created}, updated={updated}, skipped={skipped}, resources={resourcesWritten}";
+        foreach (var id in supersededToDelete)
+        {
+            if (TryDeleteOrganizationSkill(agent, id, skillService))
+                deleted++;
+        }
+
+        return $"created={created}, updated={updated}, deleted={deleted}, skipped={skipped}, resources={resourcesWritten}";
+    }
+
+    private static bool TryDeleteOrganizationSkill(string agent, string? skillId, SkillService skillService)
+    {
+        if (string.IsNullOrWhiteSpace(skillId))
+            return false;
+
+        try
+        {
+            skillService.Delete(agent, skillId);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static int WriteSkillOrganizationResources(SkillOrganizationItem item, string skillDir)
@@ -1317,10 +1529,17 @@ public sealed class SkillMaintenanceService
                 continue;
 
             Directory.CreateDirectory(Path.GetDirectoryName(resolvedPath)!);
+            ValidateSkillResourceContent(resource.Path, resource.Content);
             File.WriteAllText(resolvedPath, resource.Content);
             written++;
         }
         return written;
+    }
+
+    private static void ValidateSkillResourceContent(string path, string content)
+    {
+        if (content.Length > MaxSkillResourceFileChars)
+            throw new ArgumentException($"Skill resource `{path}` is over limit: {content.Length} chars > {MaxSkillResourceFileChars}. Split the resource or summarize large evidence instead of storing it whole.");
     }
 
     private static string BuildOrganizationReport(List<SkillOrganizationResult> results, List<string> appliedList)
@@ -1362,9 +1581,11 @@ public sealed class SkillMaintenanceService
 
             var totalCreated = results.Sum(r => r.Skills?.Count(s => (s.Action ?? "").Trim().ToLowerInvariant() == "create") ?? 0);
             var totalUpdated = results.Sum(r => r.Skills?.Count(s => (s.Action ?? "").Trim().ToLowerInvariant() == "update") ?? 0);
+            var totalDeleted = results.Sum(r => r.Skills?.Count(s => (s.Action ?? "").Trim().ToLowerInvariant() == "delete") ?? 0)
+                + results.Sum(r => r.Skills?.Sum(s => s.SupersededIds?.Count ?? 0) ?? 0);
             var totalSkipped = results.Sum(r => r.Skills?.Count(s => (s.Action ?? "").Trim().ToLowerInvariant() == "skip") ?? 0);
 
-            sb.AppendLine($"Total applied: created={totalCreated}, updated={totalUpdated}, skipped={totalSkipped}");
+            sb.AppendLine($"Total applied: created={totalCreated}, updated={totalUpdated}, deleted={totalDeleted}, skipped={totalSkipped}");
             sb.AppendLine();
             for (var index = 0; index < results.Count; index++)
                 AppendOrganizationEvidence(sb, results[index], index + 1);
@@ -1385,6 +1606,8 @@ public sealed class SkillMaintenanceService
             sb.AppendLine($"- {item.Action ?? "skip"}: {item.Name} {(string.IsNullOrWhiteSpace(item.Id) ? string.Empty : $"({item.Id})")}".TrimEnd());
             if (item.ResourceFiles?.Count > 0)
                 sb.AppendLine("  - resources: " + string.Join(", ", item.ResourceFiles.Select(file => file.Path).Where(path => !string.IsNullOrWhiteSpace(path))));
+            if (item.SupersededIds?.Count > 0)
+                sb.AppendLine("  - superseded: " + string.Join(", ", item.SupersededIds.Where(id => !string.IsNullOrWhiteSpace(id))));
             if (item.Evidence?.Count > 0)
                 sb.AppendLine("  - evidence: " + string.Join(" | ", item.Evidence.Where(text => !string.IsNullOrWhiteSpace(text)).Take(8)));
         }
@@ -1461,6 +1684,7 @@ public sealed class SkillMaintenanceService
             }
 
             Directory.CreateDirectory(Path.GetDirectoryName(resolvedPath)!);
+            ValidateSkillResourceContent(resource.Path, resource.Content);
             File.WriteAllText(resolvedPath, resource.Content);
             notes.Add($"Wrote resource `{ToSkillRelativePath(resolvedPath, normalizedSkillDir)}`.");
         }
@@ -2178,11 +2402,25 @@ internal sealed class SkillOrganizationItem
     [JsonPropertyName("content")]
     public string Content { get; set; } = string.Empty;
 
+    [JsonPropertyName("superseded_ids")]
+    public List<string>? SupersededIds { get; set; }
+
     [JsonPropertyName("resource_files")]
     public List<SkillValidationResourceFile>? ResourceFiles { get; set; }
 
     [JsonPropertyName("evidence")]
     public List<string>? Evidence { get; set; }
+}
+
+internal sealed class SkillSessionBatch
+{
+    public string SessionId { get; set; } = string.Empty;
+    public DateTimeOffset LastActivity { get; set; }
+    public int TotalMessages { get; set; }
+    public int StartIndex { get; set; }
+    public List<ChatMessage> Messages { get; set; } = new();
+    public SessionBookmark? Bookmark { get; set; }
+    public bool CompletesSession { get; set; }
 }
 
 internal sealed class SkillValidationResult

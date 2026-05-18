@@ -76,7 +76,12 @@ public sealed class WebUiProcessManager
     {
         var current = GetStatus();
         if (current.IsRunning)
-            return current;
+        {
+            if (string.Equals(current.Host, host, StringComparison.OrdinalIgnoreCase) && current.Port == port)
+                return await GetStatusAsync();
+
+            await StopAsync();
+        }
 
         Directory.CreateDirectory(MatdanceRuntime.StateRoot);
         var startInfo = BuildStartInfo(host, port);
@@ -147,7 +152,7 @@ public sealed class WebUiProcessManager
 
             try
             {
-                using var request = new HttpRequestMessage(HttpMethod.Get, state.Url.TrimEnd('/') + "/api/runtime-status");
+                using var request = new HttpRequestMessage(HttpMethod.Get, BuildLocalProbeUrl(state.Host, state.Port) + "/api/runtime-status");
                 var token = WebAuthService.TryReadConfiguredToken();
                 if (!string.IsNullOrWhiteSpace(token))
                     request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
@@ -168,7 +173,7 @@ public sealed class WebUiProcessManager
                     {
                         BackendReady = runtime.Backend,
                         BrowserReady = runtime.Browser,
-                        BrowserDependenciesInstalled = runtime.BrowserDependencies,
+                        BrowserDependenciesInstalled = runtime.Browser || runtime.BrowserDependencies,
                         Message = runtime.Browser
                             ? "Backend and browser runtime are ready."
                             : runtime.BrowserDependencies
@@ -176,7 +181,7 @@ public sealed class WebUiProcessManager
                                 : "Backend is ready; browser dependencies are missing. Run dependency installation first."
                     };
 
-                    if (status.BackendReady && (status.BrowserReady || !status.BrowserDependenciesInstalled))
+                    if (status.BackendReady)
                         return status;
                 }
             }
@@ -246,6 +251,11 @@ public sealed class WebUiProcessManager
         psi.Environment["PLAYWRIGHT_BROWSERS_PATH"] = MatdanceRuntime.PlaywrightBrowsersPath;
         psi.Environment["MATDANCE_RUNTIME_DIR"] = MatdanceRuntime.RuntimeRoot;
         psi.Environment["PLAYWRIGHT_DRIVER_SEARCH_PATH"] = playwrightDriverRoot;
+        if (WebAuthService.IsRemoteBinding(host))
+        {
+            WebAuthService.LoadOrCreate(host);
+            psi.Environment["MATDANCE_ALLOW_REMOTE_WEB"] = "1";
+        }
         return psi;
     }
 
@@ -355,6 +365,32 @@ public sealed class WebUiProcessManager
         return "'" + arg.Replace("'", "'\\''") + "'";
     }
 
+    private static string BuildLocalProbeUrl(string host, int port)
+    {
+        var value = (host ?? string.Empty).Trim().Trim('[', ']');
+        if (string.IsNullOrWhiteSpace(value)
+            || value.Equals("0.0.0.0", StringComparison.Ordinal)
+            || value.Equals("::", StringComparison.Ordinal)
+            || value.Equals("*", StringComparison.Ordinal)
+            || value.Equals("+", StringComparison.Ordinal))
+        {
+            return $"http://127.0.0.1:{port}";
+        }
+
+        if (value.Equals("localhost", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("127.0.0.1", StringComparison.Ordinal)
+            || value.Equals("::1", StringComparison.Ordinal))
+        {
+            return value.Contains(':', StringComparison.Ordinal)
+                ? $"http://[{value}]:{port}"
+                : $"http://{value}:{port}";
+        }
+
+        return value.Contains(':', StringComparison.Ordinal)
+            ? $"http://[{value}]:{port}"
+            : $"http://{value}:{port}";
+    }
+
     private WebUiState? ReadState()
     {
         if (!File.Exists(_statePath))
@@ -428,6 +464,19 @@ public sealed class WebUiProcessManager
         if (!string.IsNullOrWhiteSpace(state.ProcessName)
             && SafeProcessName(process).Equals(state.ProcessName, StringComparison.OrdinalIgnoreCase))
             return process;
+
+        if (OperatingSystem.IsMacOS() || OperatingSystem.IsLinux())
+        {
+            var expectedName = state.ProcessName ?? string.Empty;
+            var actualName = SafeProcessName(process);
+            if (expectedName.Equals("sh", StringComparison.OrdinalIgnoreCase)
+                && (actualName.Equals("dotnet", StringComparison.OrdinalIgnoreCase)
+                    || actualName.Equals("Matdance.Cli", StringComparison.OrdinalIgnoreCase)
+                    || actualName.Equals("Matdance.Cli.dll", StringComparison.OrdinalIgnoreCase)))
+            {
+                return process;
+            }
+        }
 
         return null;
     }

@@ -15,17 +15,18 @@ public class LlmClient
     private readonly AgentConfig _config;
     private static readonly ConcurrentDictionary<string, bool> EndpointsWithoutClientHeaders = new(StringComparer.OrdinalIgnoreCase);
     private const bool ThinkingTemporarilyDisabled = true;
-    private const string ClientUserAgent = "Matdance/1.1.17";
+    private const string ClientUserAgent = "Matdance/1.1.20-preview";
     private const string ClientName = "Matdance";
-    private const int MaxRetries = 10;
-    private const int MaxConfiguredTimeoutRetries = 2;
     private const int MaxLoggedRequestChars = 20_000;
     private const int ImagePayloadRetryCutoffAttempt = 3;
+    private static readonly TimeSpan StreamTransportIdleTimeout = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan StreamUsefulOutputTimeout = TimeSpan.FromSeconds(90);
+    private static readonly TimeSpan StreamResponseTimeout = TimeSpan.FromMinutes(3);
 
     public LlmClient(AgentConfig config)
     {
         _config = config;
-        _http.Timeout = TimeSpan.FromMinutes(10);
+        _http.Timeout = TimeSpan.FromMinutes(3);
     }
 
     public async Task<ChatMessage> SendAsync(
@@ -70,7 +71,8 @@ public class LlmClient
         var headerKey = GetHeaderCompatibilityKey();
         var includeClientHeaders = !EndpointsWithoutClientHeaders.ContainsKey(headerKey);
 
-        for (int attempt = 1; attempt <= MaxRetries; attempt++)
+        var maxAttempts = ReconnectRetryPolicy.TotalAttempts;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++)
         {
             var payload = CreateOpenAiPayload(
                 payloadMessages,
@@ -114,7 +116,7 @@ public class LlmClient
                 ModelCapabilityCacheService.RecordVisionUnsupported(_config, ex.Message);
                 includeImageAttachments = false;
                 payloadMessages = BuildImageUnavailableMessages(messages, "The previous request included image attachments, but the current model/API rejected multimodal image input. Continue without image pixels. Tell the user plainly that this model cannot view the image attachment in this turn; use only file names, paths, metadata, or user-provided descriptions, and do not pretend to have seen the image.");
-                LogRequestError(json, ex, $"Attempt {attempt}/{MaxRetries} rejected image content. Retrying once without image payload and with a model-visible attachment limitation notice.");
+                LogRequestError(json, ex, $"Attempt {attempt}/{maxAttempts} rejected image content. Retrying once without image payload and with a model-visible attachment limitation notice.");
                 continue;
             }
             catch (Exception ex) when (includeImageAttachments && IsRetryable(ex) && attempt <= ImagePayloadRetryCutoffAttempt && !ct.IsCancellationRequested)
@@ -122,28 +124,22 @@ public class LlmClient
                 ambiguousImagePayloadFailure = ex.Message;
                 includeImageAttachments = false;
                 payloadMessages = BuildImageUnavailableMessages(messages, "The previous request included image attachments, but the image payload failed before Matdance received a usable answer. Continue without image pixels for stability. Tell the user plainly if the task required actual visual inspection; use only file names, paths, metadata, or user-provided descriptions, and do not pretend to have seen the image.");
-                LogRequestError(json, ex, $"Attempt {attempt}/{MaxRetries} failed while image payload was attached. Retrying immediately without image payload before entering the ordinary LLM retry chain.");
+                LogRequestError(json, ex, $"Attempt {attempt}/{maxAttempts} failed while image payload was attached. Retrying immediately without image payload before entering the ordinary LLM retry chain.");
                 continue;
             }
-            catch (Exception ex) when (IsRetryable(ex) && attempt < MaxRetries && !ct.IsCancellationRequested)
+            catch (Exception ex) when (IsRetryable(ex) && attempt < maxAttempts && !ct.IsCancellationRequested)
             {
-                if (IsConfiguredHttpClientTimeout(ex) && attempt >= MaxConfiguredTimeoutRetries)
-                {
-                    LogRequestError(json, ex, $"Attempt {attempt}/{MaxRetries} timed out after the configured HttpClient timeout. Not retrying this timeout again.");
-                    throw;
-                }
-
                 if (includeClientHeaders && IsNoResponseFailure(ex))
                 {
                     includeClientHeaders = false;
                     EndpointsWithoutClientHeaders[headerKey] = true;
-                    LogRequestError(json, ex, $"Attempt {attempt}/{MaxRetries} failed with no response. Retrying without Matdance client headers.");
+                    LogRequestError(json, ex, $"Attempt {attempt}/{maxAttempts} failed with no response. Retrying without Matdance client headers.");
                     continue;
                 }
 
-                var delaySeconds = attempt * 10;
-                var delay = TimeSpan.FromSeconds(delaySeconds);
-                LogRequestError(json, ex, $"Attempt {attempt}/{MaxRetries} failed. Retrying in {delaySeconds}s...");
+                var retryStep = ReconnectRetryPolicy.GetStepAfterFailure(attempt) ?? throw new InvalidOperationException("Reconnect retry budget was exhausted.");
+                var delay = retryStep.Delay;
+                LogRequestError(json, ex, $"Attempt {attempt}/{maxAttempts} failed. {ReconnectRetryPolicy.Describe(retryStep)}");
                 if (beforeRetryDelay != null)
                 {
                     await beforeRetryDelay(attempt, delay, ex, ct);
@@ -179,12 +175,6 @@ public class LlmClient
         return ex is IOException
             || ex is TaskCanceledException
             || ex is TimeoutException;
-    }
-
-    private static bool IsConfiguredHttpClientTimeout(Exception ex)
-    {
-        return ex is TaskCanceledException
-            && ex.Message.Contains("HttpClient.Timeout", StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task<ChatMessage> SendOpenAiNonStreamingAsync(HttpRequestMessage request, bool collectReasoning, CancellationToken ct)
@@ -540,19 +530,23 @@ public class LlmClient
         {
             await using var stream = await response.Content.ReadAsStreamAsync(ct);
             using var reader = new StreamReader(stream, Encoding.UTF8);
+            var startedAt = DateTimeOffset.UtcNow;
+            var lastUsefulOutputAt = startedAt;
 
-            while (!reader.EndOfStream && !ct.IsCancellationRequested)
+            while (!ct.IsCancellationRequested)
             {
                 string? line;
                 try
                 {
-                    line = await reader.ReadLineAsync(ct);
+                    line = await ReadStreamingLineAsync(reader, ct, startedAt, lastUsefulOutputAt, "OpenAI-compatible");
                 }
                 catch (IOException)
                 {
                     // Stream closed prematurely, use what we have
                     break;
                 }
+                if (line == null)
+                    break;
 
                 if (string.IsNullOrEmpty(line) || !line.StartsWith("data: ")) continue;
                 var data = line[6..];
@@ -567,13 +561,18 @@ public class LlmClient
                     if (delta.TryGetProperty("content", out var contentNode) && contentNode.ValueKind != JsonValueKind.Null)
                     {
                         var chunk = contentNode.GetString() ?? "";
-                        contentBuilder.Append(chunk);
-                        onChunk(chunk);
+                        if (chunk.Length > 0)
+                        {
+                            lastUsefulOutputAt = DateTimeOffset.UtcNow;
+                            contentBuilder.Append(chunk);
+                            onChunk(chunk);
+                        }
                     }
 
                     var reasoningChunk = collectReasoning ? ExtractReasoningText(delta) : null;
                     if (!string.IsNullOrEmpty(reasoningChunk))
                     {
+                        lastUsefulOutputAt = DateTimeOffset.UtcNow;
                         reasoningBuilder.Append(reasoningChunk);
                         onReasoningChunk?.Invoke(reasoningChunk);
                     }
@@ -594,21 +593,33 @@ public class LlmClient
 
                             var id = TryGetString(tc, "id");
                             if (!string.IsNullOrEmpty(id))
+                            {
+                                lastUsefulOutputAt = DateTimeOffset.UtcNow;
                                 acc.Id = id;
+                            }
 
                             var type = TryGetString(tc, "type");
                             if (!string.IsNullOrEmpty(type))
+                            {
+                                lastUsefulOutputAt = DateTimeOffset.UtcNow;
                                 acc.Type = type;
+                            }
 
                             if (tc.TryGetProperty("function", out var fnNode) && fnNode.ValueKind == JsonValueKind.Object)
                             {
                                 var name = TryGetString(fnNode, "name");
                                 if (!string.IsNullOrEmpty(name))
+                                {
+                                    lastUsefulOutputAt = DateTimeOffset.UtcNow;
                                     acc.Name += name;
+                                }
 
                                 var arguments = TryGetString(fnNode, "arguments");
                                 if (!string.IsNullOrEmpty(arguments))
+                                {
+                                    lastUsefulOutputAt = DateTimeOffset.UtcNow;
                                     acc.Arguments += arguments;
+                                }
                             }
                         }
                     }
@@ -704,7 +715,8 @@ public class LlmClient
         var headerKey = GetHeaderCompatibilityKey();
         var includeClientHeaders = !EndpointsWithoutClientHeaders.ContainsKey(headerKey);
 
-        for (int attempt = 1; attempt <= MaxRetries; attempt++)
+        var maxAttempts = ReconnectRetryPolicy.TotalAttempts;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++)
         {
             var payload = CreateAnthropicPayload(
                 payloadMessages,
@@ -745,7 +757,7 @@ public class LlmClient
             {
                 var failedEndpoint = endpointCandidates[endpointIndex];
                 endpointIndex++;
-                LogRequestError(json, ex, $"Attempt {attempt}/{MaxRetries} could not find Anthropic-compatible endpoint {failedEndpoint}. Retrying with {endpointCandidates[endpointIndex]}.");
+                LogRequestError(json, ex, $"Attempt {attempt}/{maxAttempts} could not find Anthropic-compatible endpoint {failedEndpoint}. Retrying with {endpointCandidates[endpointIndex]}.");
                 continue;
             }
             catch (HttpRequestException ex) when (IsAnthropicEndpointNotFound(ex) && !ct.IsCancellationRequested)
@@ -758,7 +770,7 @@ public class LlmClient
                 ModelCapabilityCacheService.RecordVisionUnsupported(_config, ex.Message);
                 includeImageAttachments = false;
                 payloadMessages = BuildImageUnavailableMessages(messages, "The previous request included image attachments, but Anthropic rejected multimodal image input for this provider/model. Continue without image pixels. Tell the user plainly that this model cannot view the image attachment in this turn; use only file names, paths, metadata, or user-provided descriptions, and do not pretend to have seen the image.");
-                LogRequestError(json, ex, $"Attempt {attempt}/{MaxRetries} rejected image content. Retrying once without image payload and with a model-visible attachment limitation notice.");
+                LogRequestError(json, ex, $"Attempt {attempt}/{maxAttempts} rejected image content. Retrying once without image payload and with a model-visible attachment limitation notice.");
                 continue;
             }
             catch (Exception ex) when (includeImageAttachments && IsRetryable(ex) && attempt <= ImagePayloadRetryCutoffAttempt && !ct.IsCancellationRequested)
@@ -766,28 +778,22 @@ public class LlmClient
                 ambiguousImagePayloadFailure = ex.Message;
                 includeImageAttachments = false;
                 payloadMessages = BuildImageUnavailableMessages(messages, "The previous request included image attachments, but the image payload failed before Matdance received a usable Anthropic answer. Continue without image pixels for stability. Tell the user plainly if the task required actual visual inspection; use only file names, paths, metadata, or user-provided descriptions, and do not pretend to have seen the image.");
-                LogRequestError(json, ex, $"Attempt {attempt}/{MaxRetries} failed while image payload was attached. Retrying immediately without image payload before entering the ordinary LLM retry chain.");
+                LogRequestError(json, ex, $"Attempt {attempt}/{maxAttempts} failed while image payload was attached. Retrying immediately without image payload before entering the ordinary LLM retry chain.");
                 continue;
             }
-            catch (Exception ex) when (IsRetryable(ex) && attempt < MaxRetries && !ct.IsCancellationRequested)
+            catch (Exception ex) when (IsRetryable(ex) && attempt < maxAttempts && !ct.IsCancellationRequested)
             {
-                if (IsConfiguredHttpClientTimeout(ex) && attempt >= MaxConfiguredTimeoutRetries)
-                {
-                    LogRequestError(json, ex, $"Attempt {attempt}/{MaxRetries} timed out after the configured HttpClient timeout. Not retrying this timeout again.");
-                    throw;
-                }
-
                 if (includeClientHeaders && IsNoResponseFailure(ex))
                 {
                     includeClientHeaders = false;
                     EndpointsWithoutClientHeaders[headerKey] = true;
-                    LogRequestError(json, ex, $"Attempt {attempt}/{MaxRetries} failed with no response. Retrying without Matdance client headers.");
+                    LogRequestError(json, ex, $"Attempt {attempt}/{maxAttempts} failed with no response. Retrying without Matdance client headers.");
                     continue;
                 }
 
-                var delaySeconds = attempt * 10;
-                var delay = TimeSpan.FromSeconds(delaySeconds);
-                LogRequestError(json, ex, $"Attempt {attempt}/{MaxRetries} failed. Retrying in {delaySeconds}s...");
+                var retryStep = ReconnectRetryPolicy.GetStepAfterFailure(attempt) ?? throw new InvalidOperationException("Reconnect retry budget was exhausted.");
+                var delay = retryStep.Delay;
+                LogRequestError(json, ex, $"Attempt {attempt}/{maxAttempts} failed. {ReconnectRetryPolicy.Describe(retryStep)}");
                 if (beforeRetryDelay != null)
                 {
                     await beforeRetryDelay(attempt, delay, ex, ct);
@@ -1090,18 +1096,22 @@ public class LlmClient
 
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
         using var reader = new StreamReader(stream, Encoding.UTF8);
+        var startedAt = DateTimeOffset.UtcNow;
+        var lastUsefulOutputAt = startedAt;
 
-        while (!reader.EndOfStream && !ct.IsCancellationRequested)
+        while (!ct.IsCancellationRequested)
         {
             string? line;
             try
             {
-                line = await reader.ReadLineAsync(ct);
+                line = await ReadStreamingLineAsync(reader, ct, startedAt, lastUsefulOutputAt, "Anthropic-compatible");
             }
             catch (IOException)
             {
                 break;
             }
+            if (line == null)
+                break;
 
             if (string.IsNullOrWhiteSpace(line) || !line.StartsWith("data: ", StringComparison.Ordinal))
                 continue;
@@ -1129,12 +1139,14 @@ public class LlmClient
                         var text = TryGetString(block, "text");
                         if (!string.IsNullOrEmpty(text))
                         {
+                            lastUsefulOutputAt = DateTimeOffset.UtcNow;
                             contentBuilder.Append(text);
                             onChunk(text);
                         }
                     }
                     else if (blockType.Equals("tool_use", StringComparison.OrdinalIgnoreCase))
                     {
+                        lastUsefulOutputAt = DateTimeOffset.UtcNow;
                         var acc = new ToolCallAccumulator
                         {
                             Id = TryGetString(block, "id") ?? string.Empty,
@@ -1149,6 +1161,7 @@ public class LlmClient
                         var thinking = TryGetString(block, "thinking");
                         if (!string.IsNullOrEmpty(thinking))
                         {
+                            lastUsefulOutputAt = DateTimeOffset.UtcNow;
                             reasoningBuilder.Append(thinking);
                             onReasoningChunk?.Invoke(thinking);
                         }
@@ -1165,12 +1178,14 @@ public class LlmClient
                         var text = TryGetString(delta, "text") ?? string.Empty;
                         if (text.Length > 0)
                         {
+                            lastUsefulOutputAt = DateTimeOffset.UtcNow;
                             contentBuilder.Append(text);
                             onChunk(text);
                         }
                     }
                     else if (deltaType.Equals("input_json_delta", StringComparison.OrdinalIgnoreCase))
                     {
+                        lastUsefulOutputAt = DateTimeOffset.UtcNow;
                         if (!toolCallDict.TryGetValue(index, out var acc))
                         {
                             acc = new ToolCallAccumulator();
@@ -1184,6 +1199,7 @@ public class LlmClient
                         var thinking = TryGetString(delta, "thinking") ?? string.Empty;
                         if (thinking.Length > 0)
                         {
+                            lastUsefulOutputAt = DateTimeOffset.UtcNow;
                             reasoningBuilder.Append(thinking);
                             onReasoningChunk?.Invoke(thinking);
                         }
@@ -1220,6 +1236,52 @@ public class LlmClient
             ToolCalls = toolCalls is { Count: > 0 } ? toolCalls : null,
             Timestamp = UserTimeZoneService.Now()
         };
+    }
+
+    private static async Task<string?> ReadStreamingLineAsync(StreamReader reader, CancellationToken ct)
+    {
+        try
+        {
+            return await reader.ReadLineAsync(ct).AsTask().WaitAsync(StreamTransportIdleTimeout, ct);
+        }
+        catch (TimeoutException ex)
+        {
+            throw new TimeoutException($"LLM stream produced no transport data for {StreamTransportIdleTimeout.TotalSeconds:F0}s.", ex);
+        }
+    }
+
+    private static async Task<string?> ReadStreamingLineAsync(
+        StreamReader reader,
+        CancellationToken ct,
+        DateTimeOffset startedAt,
+        DateTimeOffset lastUsefulOutputAt,
+        string apiKind)
+    {
+        var elapsedTotal = DateTimeOffset.UtcNow - startedAt;
+        if (elapsedTotal > StreamResponseTimeout)
+        {
+            throw new TimeoutException(
+                $"LLM stream total response time exceeded {StreamResponseTimeout.TotalMinutes:F0}min " +
+                $"({elapsedTotal.TotalSeconds:F0}s elapsed, {apiKind}).");
+        }
+
+        var elapsedSinceUseful = DateTimeOffset.UtcNow - lastUsefulOutputAt;
+        if (elapsedSinceUseful > StreamUsefulOutputTimeout)
+        {
+            throw new TimeoutException(
+                $"LLM stream produced no useful output for {StreamUsefulOutputTimeout.TotalSeconds:F0}s " +
+                $"({elapsedSinceUseful.TotalSeconds:F0}s elapsed, {apiKind}).");
+        }
+
+        try
+        {
+            return await reader.ReadLineAsync(ct).AsTask().WaitAsync(StreamTransportIdleTimeout, ct);
+        }
+        catch (TimeoutException ex)
+        {
+            throw new TimeoutException(
+                $"LLM stream produced no transport data for {StreamTransportIdleTimeout.TotalSeconds:F0}s ({apiKind}).", ex);
+        }
     }
 
     private static ChatMessage ParseAnthropicResponseMessage(JsonElement root, bool collectReasoning)

@@ -12,11 +12,15 @@ The default Web UI should bind only to loopback addresses:
 - `127.0.0.1`
 - `::1`
 
-Non-loopback binding is refused unless you explicitly set:
+Use loopback binding for normal use. For deliberate LAN/public exposure, use the managed public wrapper:
 
 ```bash
-export MATDANCE_ALLOW_REMOTE_WEB=1
+matdance web-ui start --public --port 8765
 ```
+
+The wrapper menu also has `Web UI / Runtime supervisor` -> `Public Web UI / Remote access`, with the same start/restart/supervisor actions as the local Web UI menu but binding to `0.0.0.0`.
+
+The lower-level `web --host 0.0.0.0` command still requires `MATDANCE_ALLOW_REMOTE_WEB=1`; normal operation should go through `web-ui`.
 
 ## Remote Authentication
 
@@ -26,7 +30,9 @@ Remote binding enables single-token authentication. You can provide:
 MATDANCE_WEB_TOKEN=<long random token>
 ```
 
-If no token is provided, Matdance generates one, prints it, and stores it under `.matdance/state/web-auth.json`.
+If no token is provided, Matdance generates one, prints it along with the token-file path for public starts/supervisor setup, and stores it under `.matdance/state/web-auth.json`.
+
+Loopback binding stays token-free even when a public token file already exists. This lets you switch back from public exposure to `localhost` without carrying the public login gate into local-only use.
 
 Browser login stores an HttpOnly cookie. API clients can use:
 

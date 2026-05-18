@@ -30,6 +30,12 @@ Recommended hosted mode:
 matdance web-ui start --mode keep-alive-no-autostart --port 8765
 ```
 
+Public binding uses the same managed wrapper with `--public`; it binds `0.0.0.0`, enables token auth, and prints the token plus token-file path:
+
+```bash
+matdance web-ui start --public --port 8765
+```
+
 Status:
 
 ```bash
@@ -48,6 +54,8 @@ Stop all managed Web UI and supervisor tasks:
 ```bash
 matdance stop-all
 ```
+
+On macOS, `autostart-keep-alive` is registered as a user LaunchAgent under `~/Library/LaunchAgents`. Matdance bootstraps, enables, and kickstarts the LaunchAgent so it survives the next login instead of only existing for the current terminal session.
 
 ## Shadow Runtime
 

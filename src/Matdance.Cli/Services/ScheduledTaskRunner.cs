@@ -186,51 +186,62 @@ public class ScheduledTaskRunner
         var messages = PromptBuilder.BuildScheduledTaskMessages(task.Agent, _path, task);
         run.ContextSnapshot = messages[0].Content;
         var state = new SessionState();
-        var executor = new ToolExecutor(task.Agent, _path, state, allowInteractiveConfirmation: false, backgroundWork: _backgroundWork);
+        var notificationSession = ResolveNotificationSession(task);
+        var executor = new ToolExecutor(task.Agent, _path, state, allowInteractiveConfirmation: false, sessionId: notificationSession, backgroundWork: _backgroundWork, synchronousImageGeneration: true);
         var tools = ToolRegistry.GetAll();
         var thinkingToolNoticeSent = false;
 
-        for (var loop = 1; loop <= 200; loop++)
+        try
         {
-            Heartbeat(run, "llm_request", $"Sending scheduled subagent model request {loop}.", addEvent: true);
-            var assistant = await llm.SendAsync(messages, tools, _ => { }, ct, async (attempt, delay, error, token) =>
+            for (var loop = 1; loop <= 200; loop++)
             {
-                var message = $"Model/API retry {attempt}; waiting {delay.TotalSeconds:F0}s. {error.GetType().Name}: {error.Message}";
-                run.Events.Add(new ScheduledTaskRunEvent { Type = "llm_retry_wait", Message = message, Status = "retry" });
-                Heartbeat(run, "llm_retry_wait", message);
-                await WaitForMainAgentAsync(task, run, token);
-            }, enableThinking: false);
-            Heartbeat(run, "llm_response", $"Received scheduled subagent model response {loop}.", addEvent: true);
-            if ((assistant.ToolCalls == null || assistant.ToolCalls.Count == 0) && !thinkingToolNoticeSent && LlmResponseGuard.HasTextualToolRequestInThinking(assistant))
-            {
-                thinkingToolNoticeSent = true;
-                messages.Add(ChatMessage.User(LlmResponseGuard.ThinkingTextToolRequestNotice));
-                run.Events.Add(new ScheduledTaskRunEvent { Type = "thinking_tool_blocked", Message = LlmResponseGuard.ThinkingTextToolRequestNotice, Status = "blocked" });
-                continue;
+                Heartbeat(run, "llm_request", $"Sending scheduled subagent model request {loop}.", addEvent: true);
+                PromptBuilder.UpsertLiveFileLocksSnapshot(messages, state);
+                var assistant = await llm.SendAsync(messages, tools, _ => { }, ct, async (attempt, delay, error, token) =>
+                {
+                    var step = ReconnectRetryPolicy.GetStepAfterFailure(attempt);
+                    var batch = step == null ? "" : $" batch {step.Batch}/{step.TotalBatches} probe {step.AttemptInBatch}/{step.AttemptsInBatch};";
+                    var message = $"Model/API retry {attempt};{batch} next probe in {delay.TotalSeconds:F0}s. {error.GetType().Name}: {error.Message}";
+                    run.Events.Add(new ScheduledTaskRunEvent { Type = "llm_retry_wait", Message = message, Status = "retry" });
+                    Heartbeat(run, "llm_retry_wait", message);
+                    await WaitForMainAgentAsync(task, run, token);
+                }, enableThinking: false);
+                Heartbeat(run, "llm_response", $"Received scheduled subagent model response {loop}.", addEvent: true);
+                if ((assistant.ToolCalls == null || assistant.ToolCalls.Count == 0) && !thinkingToolNoticeSent && LlmResponseGuard.HasTextualToolRequestInThinking(assistant))
+                {
+                    thinkingToolNoticeSent = true;
+                    messages.Add(ChatMessage.User(LlmResponseGuard.ThinkingTextToolRequestNotice));
+                    run.Events.Add(new ScheduledTaskRunEvent { Type = "thinking_tool_blocked", Message = LlmResponseGuard.ThinkingTextToolRequestNotice, Status = "blocked" });
+                    continue;
+                }
+
+                if (string.IsNullOrWhiteSpace(assistant.Content) && (assistant.ToolCalls == null || assistant.ToolCalls.Count == 0))
+                    assistant.Content = "(no response)";
+
+                messages.Add(assistant);
+                run.Events.Add(new ScheduledTaskRunEvent { Type = "assistant", Message = Trim(assistant.Content, 4000), Status = assistant.ToolCalls == null ? "final" : "tool_calls" });
+                _tasks.HeartbeatRun(run, "assistant", Trim(assistant.Content, 700));
+
+                if (assistant.ToolCalls == null || assistant.ToolCalls.Count == 0)
+                {
+                    run.Output = assistant.Content;
+                    run.Status = ScheduledTaskRunStatuses.Succeeded;
+                    break;
+                }
+
+                foreach (var toolCall in assistant.ToolCalls)
+                {
+                    Heartbeat(run, "tool_call_start", toolCall.Function.Name, addEvent: true);
+                    var result = await executor.ExecuteAsync(toolCall, ct);
+                    messages.Add(ChatMessage.Tool(toolCall.Id, result));
+                    run.Events.Add(new ScheduledTaskRunEvent { Type = "tool_call", ToolName = toolCall.Function.Name, ToolArguments = Trim(toolCall.Function.Arguments, 2000), ToolResult = Trim(result, 4000), Status = IsToolError(result) ? "error" : "done" });
+                    Heartbeat(run, "tool_call_done", $"{toolCall.Function.Name}: {(IsToolError(result) ? "error" : "done")}");
+                }
             }
-
-            if (string.IsNullOrWhiteSpace(assistant.Content) && (assistant.ToolCalls == null || assistant.ToolCalls.Count == 0))
-                assistant.Content = "(no response)";
-
-            messages.Add(assistant);
-            run.Events.Add(new ScheduledTaskRunEvent { Type = "assistant", Message = Trim(assistant.Content, 4000), Status = assistant.ToolCalls == null ? "final" : "tool_calls" });
-            _tasks.HeartbeatRun(run, "assistant", Trim(assistant.Content, 700));
-
-            if (assistant.ToolCalls == null || assistant.ToolCalls.Count == 0)
-            {
-                run.Output = assistant.Content;
-                run.Status = ScheduledTaskRunStatuses.Succeeded;
-                break;
-            }
-
-            foreach (var toolCall in assistant.ToolCalls)
-            {
-                Heartbeat(run, "tool_call_start", toolCall.Function.Name, addEvent: true);
-                var result = await executor.ExecuteAsync(toolCall);
-                messages.Add(ChatMessage.Tool(toolCall.Id, result));
-                run.Events.Add(new ScheduledTaskRunEvent { Type = "tool_call", ToolName = toolCall.Function.Name, ToolArguments = Trim(toolCall.Function.Arguments, 2000), ToolResult = Trim(result, 4000), Status = IsToolError(result) ? "error" : "done" });
-                Heartbeat(run, "tool_call_done", $"{toolCall.Function.Name}: {(IsToolError(result) ? "error" : "done")}");
-            }
+        }
+        finally
+        {
+            state.ClearTraceLocks();
         }
 
         if (run.Status == ScheduledTaskRunStatuses.Running)
@@ -278,6 +289,14 @@ public class ScheduledTaskRunner
             }
             run.DeliveryResults.Add(delivery);
         }
+    }
+
+    private string? ResolveNotificationSession(ScheduledTaskItem task)
+    {
+        if (!string.IsNullOrWhiteSpace(task.CreatedFromSession))
+            return task.CreatedFromSession;
+
+        return _tasks.ResolveTargetSessions(task).FirstOrDefault();
     }
 
     private async Task WaitForMainAgentAsync(ScheduledTaskItem task, ScheduledTaskRun run, CancellationToken ct)

@@ -6,7 +6,7 @@
 
 Language: [English](README.md) | 中文
 
-当前版本：v1.1.19
+当前版本：v1.1.20-preview
 
 Matdance 是一个本地优先的 C# Agent 运行时。它把 Web UI、会话、记忆、技能、工作区、定时任务、浏览器自动化、文件预览、多模态资产生成和后台维护任务放进同一套本地持久化系统里。
 
@@ -83,7 +83,7 @@ Windows 对应：
 - 定时任务系统：支持一次性、每日、多次、窗口循环任务，并在重启、休眠或中断后补偿错过触发。
 - 浏览器自动化：基于 Playwright 的受控 Chromium，支持导航、点击、输入、截图、读取页面和 cookie 保存/应用诊断。
 - 文件附件与预览：Chat 支持最多 3 个附件，内联 `{show_file:...}` 可展示图片、HTML、Markdown、文本、音频和常见文档。
-- 多模态工具：支持图像生成、TTS 资产生成、Chat/Lab 语音播放，以及浏览器 Web Speech 录音识别。
+- 多模态工具：支持宿主级异步图像生成、TTS 资产生成、Chat/Lab 语音播放，以及浏览器 Web Speech 录音识别。
 - 本地可检查：会话、记忆、技能、任务运行记录和工作区文件都落在本地目录里。
 
 ## 文档索引
@@ -99,6 +99,11 @@ Windows 对应：
 - [docs/zh-CN/scheduled-tasks.md](docs/zh-CN/scheduled-tasks.md)：定时任务与后台可靠性。
 - [docs/zh-CN/tools-and-multimodal.md](docs/zh-CN/tools-and-multimodal.md)：工具、浏览器与多模态。
 - [docs/zh-CN/runtime-and-development.md](docs/zh-CN/runtime-and-development.md)：运行守护与开发说明。
+
+## 已知技术债
+
+- **技能整理存在上下文债务**：如果只按"会话"切分，而不是按新增消息、目标 skill 和合并阶段切分，长会话或巨型 tool 输出仍可能触发模型输入上限。完整修复方向是增量 ingest、技能工作锁 / journal、单技能 apply、pairwise merge 和自适应降级回升。
+- **Anthropic 兼容路径存在同步磁盘 I/O 瓶颈**：`ModelCapabilityCacheService` 在每次 Anthropic 请求成功后都会走 `lock (Gate) { ReadState(); WriteState(); }`（`LlmClient.cs:1092`）。OpenAI 路径没有这个问题。这会导致 Anthropic 流式响应在 Header 返回后、正文读取前被磁盘写操作卡住，高并发时尤为明显。根因已确认，修复方向是内存缓存 + 后台异步刷盘，但暂不进入本版本，先记录为已知技术债。
 
 ## 运行边界
 

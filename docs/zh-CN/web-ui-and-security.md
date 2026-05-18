@@ -17,13 +17,19 @@ Web UI 是 Matdance 的主入口。聊天、配置、记忆、技能、定时任
 
 ## 访问方式
 
-默认 Web UI 只应绑定本机 loopback 地址。非 loopback host 会被拒绝，除非显式设置：
+默认 Web UI 只应绑定本机 loopback 地址。需要主动暴露到局域网或公网时，使用托管的 public 包装入口：
 
 ```bash
-export MATDANCE_ALLOW_REMOTE_WEB=1
+matdance web-ui start --public --port 8765
 ```
 
-远程绑定会启用单 token 鉴权。浏览器登录通过 HttpOnly cookie 保存认证态；系统 API 也接受 `Authorization: Bearer <token>` 或 `X-Matdance-Token`。如果没有设置 `MATDANCE_WEB_TOKEN`，Matdance 会生成 token 并保存到 `.matdance/state/web-auth.json`。
+包装菜单中也有 `Web UI / 运行守护` -> `Public Web UI / Remote access` 二级入口。它和本地 Web UI 菜单的启动、重启、守护选项一致，只是绑定地址改为 `0.0.0.0`。
+
+底层 `web --host 0.0.0.0` 命令仍需要手动设置 `MATDANCE_ALLOW_REMOTE_WEB=1`；日常使用应走 `web-ui`。
+
+远程绑定会启用单 token 鉴权。浏览器登录通过 HttpOnly cookie 保存认证态；系统 API 也接受 `Authorization: Bearer <token>` 或 `X-Matdance-Token`。如果没有设置 `MATDANCE_WEB_TOKEN`，Matdance 会生成 token，并在 public 启动或配置守护时打印 token 和 token 文件位置，随后保存到 `.matdance/state/web-auth.json`。
+
+即使 public token 文件已经存在，切回 `localhost`、`127.0.0.1` 或 `::1` 这类本机绑定时也不会启用 token 鉴权。这样可以在公网和内网模式之间切换，不会因为开过一次 public 就让本机访问也进入登录页。
 
 ## 隐私访问开关
 

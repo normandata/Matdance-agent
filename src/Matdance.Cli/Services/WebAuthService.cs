@@ -26,10 +26,14 @@ public sealed class WebAuthService
     public string Source { get; }
     public bool RemoteBinding { get; }
     public string? GeneratedToken { get; }
+    public string? TokenForLocalDisplay => _token;
 
     public static WebAuthService LoadOrCreate(string host)
     {
-        var remoteBinding = !IsLoopbackHost(host);
+        var remoteBinding = IsRemoteBinding(host);
+        if (!remoteBinding)
+            return new WebAuthService(false, null, "disabled", remoteBinding, null);
+
         var envToken = Environment.GetEnvironmentVariable(TokenEnvironmentVariable);
         if (!string.IsNullOrWhiteSpace(envToken))
             return new WebAuthService(true, envToken.Trim(), "environment", remoteBinding, null);
@@ -37,9 +41,6 @@ public sealed class WebAuthService
         var stored = ReadState();
         if (!string.IsNullOrWhiteSpace(stored?.Token))
             return new WebAuthService(true, stored.Token.Trim(), "state", remoteBinding, null);
-
-        if (!remoteBinding)
-            return new WebAuthService(false, null, "disabled", remoteBinding, null);
 
         var generated = GenerateToken();
         WriteState(new WebAuthState
@@ -102,6 +103,8 @@ public sealed class WebAuthService
 
     public static string StatePath => Path.Combine(MatdanceRuntime.StateRoot, "web-auth.json");
 
+    public static bool IsRemoteBinding(string host) => !IsLoopbackHost(host);
+
     private static string? ExtractPresentedToken(HttpContext context)
     {
         var authorization = context.Request.Headers.Authorization.ToString();
@@ -151,7 +154,7 @@ public sealed class WebAuthService
             .Replace("/", "_", StringComparison.Ordinal);
     }
 
-    private static bool IsLoopbackHost(string host)
+    public static bool IsLoopbackHost(string host)
     {
         var value = (host ?? string.Empty).Trim().Trim('[', ']');
         if (value.Equals("localhost", StringComparison.OrdinalIgnoreCase))

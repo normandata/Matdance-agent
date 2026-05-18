@@ -6,7 +6,7 @@
 
 Language: English | [中文](README.zh-CN.md)
 
-Current version: v1.1.19
+Current version: v1.1.20-preview
 
 Matdance is a local-first C# agent runtime. It brings the Web UI, conversations, memory, skills, workspaces, scheduled tasks, browser automation, file previews, multimodal asset generation, and background maintenance into one persistent local system.
 
@@ -83,7 +83,7 @@ For complete startup, entry registration, hosted Web UI, model configuration, an
 - Scheduled tasks: once, daily, repeated, windowed, and catch-up execution after restart, sleep, or interruption.
 - Browser automation: controlled Playwright Chromium with navigation, clicking, typing, screenshots, page reading, and cookie save/apply diagnostics.
 - Attachments and previews: Chat supports up to three attachments, and inline `{show_file:...}` can display images, HTML, Markdown, text, audio, and common documents.
-- Multimodal tools: image generation, TTS asset generation, Chat/Lab audio playback, and browser Web Speech recording recognition.
+- Multimodal tools: host-managed asynchronous image generation, TTS asset generation, Chat/Lab audio playback, and browser Web Speech recording recognition.
 - Inspectable local state: sessions, memories, skills, task runs, and workspace artifacts are local files.
 - Anthropic Messages API support: Claude can use Matdance tools through native `tool_use` / `tool_result` blocks, including streaming tool argument collection.
 
@@ -101,6 +101,11 @@ For complete startup, entry registration, hosted Web UI, model configuration, an
 - [docs/scheduled-tasks.md](docs/scheduled-tasks.md): scheduled tasks and background reliability.
 - [docs/tools-and-multimodal.md](docs/tools-and-multimodal.md): tools, browser automation, and multimodal paths.
 - [docs/runtime-and-development.md](docs/runtime-and-development.md): supervisor, runtime, and development notes.
+
+## Known Issues
+
+- **Skill organization carries context debt**: splitting only by "session" rather than by new messages, target skill, and merge stages can still hit model input limits during long sessions or giant tool outputs. The full fix is incremental ingest, skill work locks / journal, single-skill apply, pairwise merge, and adaptive degrade/recover.
+- **Anthropic compatibility path has a synchronous disk I/O bottleneck**: `ModelCapabilityCacheService` does `lock (Gate) { ReadState(); WriteState(); }` after every Anthropic request success (`LlmClient.cs:1092`). The OpenAI path is not affected. This stalls the Anthropic streaming response between header return and body read, especially under high concurrency. Root cause is confirmed; the fix is in-memory cache + background async flush, but it is deferred and recorded as known technical debt for now.
 
 ## Runtime Boundaries
 

@@ -257,14 +257,20 @@ public static class ChatRenderer
         var table = new Table()
             .Border(TableBorder.Rounded)
             .BorderColor(Color.DodgerBlue1)
+            .AddColumn("Kind")
+            .AddColumn("ID")
             .AddColumn("Path")
+            .AddColumn("Range", c => c.Width(14))
             .AddColumn("Size", c => c.Width(10).RightAligned())
             .AddColumn("Last Read", c => c.Width(12));
 
         foreach (var f in files)
         {
             table.AddRow(
+                $"[dim]{f.Kind.EscapeMarkup()}[/]",
+                $"[dim]{f.Id.EscapeMarkup()}[/]",
                 $"[dim]{f.Path.EscapeMarkup()}[/]",
+                $"[dim]L{f.StartLine}-L{f.EndLine}[/]",
                 $"[dim]{f.Content.Length:N0}[/]",
                 $"[dim]{f.LastRead:HH:mm:ss}[/]"
             );

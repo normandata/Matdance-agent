@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Matdance.Cli.Services;
 
 namespace Matdance.Cli.Models;
 
@@ -314,6 +315,9 @@ public sealed class ImageGenerationRequest
     public string Agent { get; set; } = string.Empty;
     public string? ImageProfile { get; set; }
     public bool AllowProfileFallback { get; set; } = true;
+    public string? JobId { get; set; }
+    public string? BatchId { get; set; }
+    public string? Session { get; set; }
     public string Prompt { get; set; } = string.Empty;
     public string? Size { get; set; }
     public string? Quality { get; set; }
@@ -373,11 +377,67 @@ public sealed class GeneratedFileResult
     public string Type { get; set; } = string.Empty;
     public long Size { get; set; }
     public string Format { get; set; } = string.Empty;
+    public string? JobId { get; set; }
+    public string? BatchId { get; set; }
+    public string? Prompt { get; set; }
+    public string? RequestedImageProfile { get; set; }
+    public bool? FallbackOccurred { get; set; }
     public string? ImageProfileId { get; set; }
     public string? ImageProfileName { get; set; }
     public string? TtsProfileId { get; set; }
     public string? TtsProfileName { get; set; }
     public string? Model { get; set; }
+}
+
+public sealed class ImageGenerationOutcome
+{
+    public bool Success { get; set; }
+    public string? Error { get; set; }
+    public string? ErrorType { get; set; }
+    public string? ErrorCategory { get; set; }
+    public bool FallbackOccurred { get; set; }
+    public List<ImageGenerationAttempt> Attempts { get; set; } = new();
+    public List<GeneratedFileResult> Results { get; set; } = new();
+}
+
+public sealed class ImageGenerationAttempt
+{
+    public int Order { get; set; }
+    public string? ProfileId { get; set; }
+    public string? ProfileName { get; set; }
+    public string? Model { get; set; }
+    public string Status { get; set; } = "pending";
+    public string? Error { get; set; }
+    public string? ErrorType { get; set; }
+    public DateTimeOffset StartedAt { get; set; } = UserTimeZoneService.Now();
+    public DateTimeOffset? FinishedAt { get; set; }
+}
+
+public sealed class ImageGenerationJob
+{
+    public string JobId { get; set; } = string.Empty;
+    public string BatchId { get; set; } = string.Empty;
+    public string Agent { get; set; } = string.Empty;
+    public string? Session { get; set; }
+    public string Status { get; set; } = "queued";
+    public string Prompt { get; set; } = string.Empty;
+    public string? RequestedProfile { get; set; }
+    public string? Size { get; set; }
+    public string? Quality { get; set; }
+    public string? OutputFormat { get; set; }
+    public int Count { get; set; } = 1;
+    public string? OutputPath { get; set; }
+    public bool UseBrowserTemp { get; set; }
+    public bool AllowProfileFallback { get; set; } = true;
+    public bool FallbackOccurred { get; set; }
+    public string? Error { get; set; }
+    public string? ErrorType { get; set; }
+    public string? ErrorCategory { get; set; }
+    public DateTimeOffset CreatedAt { get; set; } = UserTimeZoneService.Now();
+    public DateTimeOffset? StartedAt { get; set; }
+    public DateTimeOffset? FinishedAt { get; set; }
+    public List<ImageGenerationAttempt> Attempts { get; set; } = new();
+    public List<GeneratedFileResult> Results { get; set; } = new();
 }
 
 public sealed class AudioAttachment

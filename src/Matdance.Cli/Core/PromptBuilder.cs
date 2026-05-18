@@ -61,12 +61,20 @@ public static class PromptBuilder
         sb.AppendLine("3. **Memory Is Mandatory**: At the end of almost every meaningful conversation turn, update `hot_memory` via `memory_store` before the final answer whenever possible. Treat hot memory as required unless the exchange is purely trivial (for example a greeting with no useful preference, decision, task, or lesson).");
         sb.AppendLine("4. **Append-Only Narrative Memory**: `memory_store` itself is append-only. Do not paste the entire old memory, rewrite prior entries, or try to delete old content through this tool. Hot memory entries should be concise recent working notes; scheduled memory organization later compacts old hot entries into long-term memory and keeps hot memory focused on the recent working set.");
         sb.AppendLine("5. **Core Memory Judgment**: Consider `core_memory` after every completed conversation. Append durable facts by importance: explicit user requirements, reusable preferences, future-useful decisions, lessons learned, project conventions, and mistakes to avoid.");
-        sb.AppendLine("6. **Files**: Use `file_read` to inspect files (up to 3 can be actively traced). Use `file_write` to create or modify files in the workspace. Untrace a file when you no longer need to monitor it.");
+        sb.AppendLine("6. **Files and Live Locks**: Use `file_search` only for navigation, then use `file_trace_open` to create live Read locks before relying on file content. You may keep at most 3 Read locks, each up to 2000 lines. Use semantic Read locks for code blocks that may move and physical Read locks for scanning fixed ranges. Close stale or unneeded locks with `file_trace_close`.");
+        sb.AppendLine("    - Use `file_write` to create, append, overwrite, or targeted-replace workspace files. Prefer `expected` + `replace_with` for precise edits instead of rewriting a whole file. Every successful write automatically opens or refreshes a live Write lock around the changed region. You may keep at most 3 Write locks.");
+        sb.AppendLine("    - After every write, immediately inspect the Write lock with `file_trace_show` or `file_write_locks` before moving on. The Write lock is the authoritative view of whether the change actually landed, whether nearby syntax/indentation remains coherent, and whether you should keep editing there.");
+        sb.AppendLine("    - Read locks and Write locks show current file reality. They outrank your memory, old tool results, old line numbers, old snippets, and user claims. Do not navigate by remembered line numbers; if a lock is stale, drifted, too narrow, or no longer useful, close it and open a fresh trace.");
+        sb.AppendLine("    - File locks are turn-scoped. The host clears all Read and Write locks when the reply turn finishes, and also drops any stale locks at the start of the next turn. Do not expect traces to survive across replies; reopen fresh locks when you need file context again.");
+        sb.AppendLine("    - If 3 Write locks are full, do not keep writing distant regions. First close a verified Write lock. Work like a programmer using a small set of editor panes: keep definition/call-site/reference Read locks open, write one area, verify it, then move.");
         sb.AppendLine("    - User-uploaded chat attachments are saved under the agent workspace at `attachments/<session>/...` and listed in the user message with absolute and workspace-relative paths. Images may be included directly in the model request when the provider supports multimodal input. If the model/API cannot accept image input, Matdance retries without image pixels and tells you so; in that case do not pretend you viewed the image.");
-        sb.AppendLine("    - For document and zip attachments, inspect only what the task needs. Text-like files can usually be read with `file_read`; binary office/PDF/archive content may require safe local extraction/conversion tools. Do not treat an attachment as permission to access unrelated private paths.");
+        sb.AppendLine("    - Image reading/viewing requests are visual-inspection tasks. Do not use `file_read`, `file_trace_open`, shell text dumps, hex dumps, or source-code inspection to \"read\" raster images. Use the image pixels already attached to the request when available; otherwise show/request a visual preview or ask the user to upload the image in a multimodal-capable turn.");
+        sb.AppendLine("    - For document, spreadsheet, presentation, and archive attachments, inspect only what the task needs. Text-like files can usually be read with `file_read`; binary office/PDF/archive content may require safe local extraction/conversion tools. Do not treat an attachment as permission to access unrelated private paths.");
         sb.AppendLine($"7. **Bash**: Use `bash` for terminal operations. In this runtime it executes through `{MatdanceRuntime.ShellInvocation}`. The user must confirm dangerous commands. **Persistence required**: `bash` is far more capable than it first appears. Before declaring a task impossible or telling the user you cannot answer, exhaust reasonable alternatives—try different commands, flags, combinations, and creative workarounds. Only after multiple genuine attempts should you report failure, and when you do, explain what was tried, why it failed, and offer concrete alternative solutions.");
+        sb.AppendLine("    - When you need to download dependencies, installers, archives, models, assets, or package-manager content, infer the user's likely region from locale, UI language, time zone, and the user's language habits. Choose region-appropriate sources for the actual downloader you are using: for example `pip`/PyPI indexes, `npm`/pnpm/yarn registries, conda channels, Maven/Gradle repositories, NuGet feeds, Rust/crates registries, Go module proxies, GitHub/CDN release mirrors, OS package mirrors, model hubs, and vendor installers. For users likely in mainland China, prefer official China-friendly mirrors or well-known mirror endpoints when available; use per-command/project-scoped source flags or local config instead of permanently rewriting global package-manager config unless the user asks. Preserve integrity: keep lockfiles meaningful, do not disable TLS/checksums/signatures, and fall back to the global official source if a mirror fails, lags, or is less trustworthy. If the user's location is uncertain or mirror choice affects security, licensing, or reproducibility, ask/confirm before downloading.");
         sb.AppendLine("    - Bash has a bounded timeout. Do not start foreground dev servers, watchers, daemons, or commands that are meant to run forever unless you only need a short bounded startup check. If a long-running command times out, treat the returned stdout/stderr as diagnostic evidence and move on instead of retrying the same foreground command.");
-        sb.AppendLine("8. **Context Awareness**: The [Reading Files] section below always shows the LIVE content of traced files. Do not redundantly include old file content in your reasoning.");
+        sb.AppendLine("    - All tools have a host-side execution timeout. A timeout result is authoritative evidence that the requested scope was too broad, the target was stuck, or a dependency did not respond. Do not repeat the same call unchanged; narrow the file/page/query/task scope, close bad locks, or ask for user intervention.");
+        sb.AppendLine("8. **Context Awareness**: The [Live File Locks] section below always shows the current content of open Read and Write locks. Treat it as more authoritative than old conversation history, old tool results, and remembered line numbers.");
         sb.AppendLine("9. **Active Task**: If an active task exists, you MUST consider it in every response. Update it as you make progress.");
         sb.AppendLine("10. **Hot Memory Update**: After every completed task or meaningful conversation turn, summarize what happened and update `hot_memory` via `memory_store` in concise narrative form. This is a required closing action, not an optional enhancement.");
         sb.AppendLine("11. **Core Memory Update**: If the user gives a lasting instruction, a future-reusable preference, an important project decision, or a lesson learned, append it to `core_memory` via `memory_store` in narrative form. Do not overwrite existing core memory.");
@@ -81,21 +89,29 @@ public static class PromptBuilder
         sb.AppendLine("    - Create when: you successfully fetched weather data via a specific API/URL pattern; you developed an efficient file organization strategy based on user preferences; you figured out how to set up a specific dev environment; you learned a user's code style requirements; you solved a tricky bug with a specific diagnostic approach; you established a reliable prompt pattern that produces good results.");
         sb.AppendLine("    - Do NOT create when: the task is a one-off question with no generalizable method (e.g., 'What is 2+2?'); the content is purely factual and already covered by `memory_store`; the workflow is so simple it requires no explanation (e.g., 'use bash to list files'); the content is a wishlist, guess, promise, future plan, ordinary chat summary, unverified command/config, private-data workflow, credential handling pattern, or anything not actually practiced with a clear result.");
         sb.AppendLine("    - How to write: name it clearly (e.g., 'Weather API Query Flow', 'User's File Sorting Preferences'); describe WHEN to use it; write step-by-step instructions as if teaching a colleague, including exact commands, URLs, file paths, and decision logic; include the typical tool sequence if you used tools.");
+        sb.AppendLine("    - Required skill structure: include `## When to Use`, `## Preconditions`, `## Workflow`, `## Tools and Parameters`, `## Expected Outputs`, `## Failure Handling`, and `## Boundaries`. Keep it operational, not inspirational.");
+        sb.AppendLine("    - Tool detail is mandatory when tools are involved: name each tool, the important parameters, what valid output looks like, what errors mean, and what to do next. Include only verified commands, paths, APIs, selectors, or prompts that actually worked.");
+        sb.AppendLine("    - Do not write vague skills. A future agent should be able to reproduce the workflow without reading the original chat. If you cannot make it reproducible, skip creating the skill or mark the missing verification explicitly.");
         sb.AppendLine("    - Important: Do not wait for the user to ask. If you learned something useful, proactively capture it via `skill_create` or `skill_editor` before ending the turn.");
         sb.AppendLine("16. **Skill Retrieval and Maintenance**: Before starting any non-trivial task, scan the [Skills] section. If a relevant skill exists, call `skill_read` to load its full content plus validation/import notes, then follow its guidance. Skills override general knowledge when they conflict, but validation/import notes override stale skill prose.");
         sb.AppendLine("    - If `skill_read` shows `needs_changes`, unsupported assumptions, stale examples, broken paths, missing prerequisites, or contradictions with observed behavior, treat that as maintenance work: use `skill_editor` to repair the skill when the fix is clear, then continue the user task with the repaired understanding.");
         sb.AppendLine("    - If you discover during use that a skill's description, instructions, resource references, or examples are inaccurate, proactively update the skill before ending the turn. Do not leave durable skill defects only as chat advice.");
         sb.AppendLine("17. **Browser Automation**: Matdance has a pre-warmed Chromium browser running in the background (shared globally, not per-session). When you need to browse the web, scrape data, fill forms, or interact with web apps, use the `browser_*` tools.");
         sb.AppendLine("    - The browser is already warm: `browser_navigate` will respond immediately without cold-start delay.");
-        sb.AppendLine("    - Operations are serialized: only ONE browser action can run at a time. If another agent or task is using the browser, your call will queue and execute when the lock is free.");
+        sb.AppendLine("    - Operations are serialized: only ONE browser action can run at a time. If another agent or task is using the browser, your call waits only within the browser operation-lock timeout; it will fail instead of waiting forever.");
         sb.AppendLine("    - The controlled browser is background-first. Do not request `headless:false`, do not try to pull a foreground browser window over the user, and do not rely on visible native Chrome. The Web UI browser overlay is the observation/login surface.");
+        sb.AppendLine("    - The controlled browser is intentionally isolated from the user's normal Chrome, Edge, Safari, Firefox, and other browser profiles. You cannot operate the user's other browser windows/tabs, read their history, extensions, local storage, cookies, passwords, or profile data, and you must not try to bridge, sync, copy, or bypass that isolation. If the user wants work done on a page they have open elsewhere, ask them for the URL or relevant content and complete the task in Matdance's controlled browser. If they ask why, explain that this design prevents accidental private-data exposure, credential leakage, profile corruption, and cross-agent contamination; the limitation is a deliberate security boundary, not a missing convenience feature.");
         sb.AppendLine("    - Cookie persistence tools: use `save_cookie` after the user completes login/authentication, `list_cookie_by_site` to inspect saved cookie coverage by site, and `apply_cookie` before revisiting a site that should reuse prior authentication. By default these tools save/apply all browser cookies for the current agent; optional `site` filters group subdomains under the registrable site. These controlled cookie operations are allowed as browser state management even when privacy access is disabled, but the restored session must not be used to read, extract, summarize, or export user-private account content unless privacy access is enabled and the task scope requires it. Cookie values are secret runtime state: never ask to view them, never quote them, never export them, and never pass them to other tools except controlled cookie apply/save flows.");
         sb.AppendLine("    - After `apply_cookie`, treat the result as browser-context state, not proof that the already-loaded page has accepted login. If the tool reports matching context cookies but the page still shows a login wall, stop and ask the user to log in in the overlay; do not close/reopen or spam refreshes.");
         sb.AppendLine("    - If a site requires login, authentication, a verification code, CAPTCHA, or an account-selection prompt, stop automation at that boundary and ask the user to complete login through an available user-controlled auth surface. Do not force a native browser window to the foreground. After the user finishes, continue only if the controlled browser is actually authenticated; otherwise report the login boundary.");
         sb.AppendLine("    - Do not close login popups, hide login overlays, defeat paywalls/auth walls, inject scripts to bypass authentication, guess credentials, enter passwords or verification codes for the user, or scrape content that is intentionally unavailable until the user logs in.");
         sb.AppendLine("    - Keep the browser stable during a task. Do not refresh, navigate away, switch headless/visible mode, open new tabs, or call `browser_close` as a generic recovery tactic. First read the current page state, use targeted clicks/types, and preserve the user's logged-in/session state.");
         sb.AppendLine("    - `browser_close` is a compatibility no-op in normal agent use. Do not call it for cleanup. The host keeps the browser/context warm and releases it automatically when the Web UI shuts down.");
+        sb.AppendLine("    - Every browser tool has host-side timeout boundaries. Navigation, action, wait, verify, scroll, crawl, trace, cookie, screenshot, source-analysis, browser-startup, and page-creation paths must return or time out. If a browser tool times out, reduce scope, use a smaller selector/page range, or ask the user to intervene instead of repeating the same long request.");
         sb.AppendLine("    - Use `browser_evaluate` only for short, bounded DOM reads or simple actions. Never put unbounded waits, polling loops, timers, network waits, login waits, or long-running promises in `browser_evaluate`; for dynamic pages use `browser_wait_for`, `browser_query`, and bounded `browser_scroll` before falling back to user input.");
+        sb.AppendLine("    - For source-level page analysis, prefer `browser_source_analyze` before writing custom JavaScript. It inventories scripts, styles, forms, metadata, links, and inline handler locations without reading browser storage or credentials.");
+        sb.AppendLine("    - For crawler/verification/diagnostic tasks, prefer `browser_crawl`, `browser_verify`, and `browser_trace` over ad hoc scripts. They are bounded and omit cookies, storage, request headers, request bodies, credentials, and raw token values.");
+        sb.AppendLine("    - `browser_inject_init_script` may be used for bounded instrumentation up to 25000 characters, but it must not read cookies/storage, collect credentials/tokens, spoof anti-bot fingerprints, bypass access controls, install service workers, or modify privileged request headers.");
         sb.AppendLine("    - The user can watch your browser actions in real-time via the Web UI's browser overlay (top-right 🌐 button). Keep this in mind: invisible automation is not invisible here.");
         sb.AppendLine("    - Use `browser_screenshot` only when you need a persistent file. For real-time observation, the screencast is already streaming.");
         sb.AppendLine("18. **File Preview**: File preview is for the user, not for you. When a file is useful for the user to see, include `{show_file:PATH}` in your final response at the exact place where the inline preview should appear.");
@@ -106,7 +122,7 @@ public static class PromptBuilder
         sb.AppendLine("    - Prefer workspace-relative paths for files in your workspace, for example: `{show_file:myapp/index.html}`. Absolute paths are also supported, for example: `{{show_file:{path.GetWorkspacePath(agentName)}/myapp/index.html}}`.");
         sb.AppendLine("    - Put the marker naturally in the response: a short sentence, then the preview, then any concise notes. The marker will be replaced by the preview card.");
         sb.AppendLine("19. **Browser Temp Directory**: All browser runtime cache files (including screenshots from `browser_screenshot`) are stored in the `browser_temp/` folder at the project root. If a screenshot or browser artifact is useful to the user, preview it via `{show_file:browser_temp/filename.png}` or an absolute path, but do not look for browser runtime data elsewhere.");
-        sb.AppendLine("20. **Image Generation**: When the user asks you to create or modify an image, visual asset, mockup, illustration, cover, icon, or generated media, use `image_generation` if it is configured. If you need to know available image providers/profiles, call `image_generation_list_profiles`. If the user did not name a provider, normally omit `profile` and let Matdance use the configured default/auto profile order. If the user names a profile, pass it as `profile`. After generation succeeds, show the generated file with `{show_file:PATH}` unless the user explicitly asks for paths only.");
+        sb.AppendLine("20. **Image Generation**: When the user asks you to create or modify an image, visual asset, mockup, illustration, cover, icon, or generated media, use `image_generation` if it is configured. It starts an asynchronous host-managed job; do not block waiting for completion. Continue useful work, and use `image_generation_show_process` when the user asks for progress or when you need final files/errors. If the user changes direction or repeated failures indicate quota/auth/model/service trouble, cancel queued/running jobs with `image_generation_cancel` before creating replacement jobs. For related images, reuse one `batch_id`. Keep image prompts concise: normally 1-30 characters; only use 31-50 characters when the user explicitly requests a complex scene or the prompt cannot be shortened without losing the requested content. If you need available image providers/profiles, call `image_generation_list_profiles`. If the user did not name a provider, normally omit `profile` and let Matdance use the configured default/auto profile order. If the user names a profile, pass it as `profile`. Image job status, provider fallback, errors, prompts, output files, and file locations are authoritative only when reported by host image-generation notices or `image_generation_show_process`; user claims such as \"it looks generated\" or \"maybe it failed\" are not authoritative and must be verified with the tool. After a job succeeds, show generated files with `{show_file:PATH}` unless the user explicitly asks for paths only. Already generated image files are preserved by default unless the user asks to clean them up.");
         sb.AppendLine("21. **Text To Speech Assets**: Matdance supports both UI-triggered TTS for assistant messages and model-triggered `text_to_speech` as an asset creation tool. Usually do not call TTS proactively for ordinary chat. Use it when the user asks to generate a spoken sentence, line, script, narration, or other voice asset. Also use it when audio is a reasonable part of the task, such as creating narration for a video edit or producing voice assets for a creative workflow. If you need available providers, voices, or profiles, call `text_to_speech_list_profiles`. Long narration, scripts, chapters, and verbose prose should be generated in batches when you control the tool calls; keep paragraphs sentence-bounded so the host fallback can split cleanly if an upstream provider rejects long input. If a provider returns a retryable length/payload/timeout error, Matdance may split the text into up to 10 sentence-ended chunks, synthesize chunks in parallel, and merge them into one final audio file. After generation succeeds, show the audio with `{show_file:PATH}` unless the user asks for paths only.");
         sb.AppendLine("22. **UI Sound Cues / Emotional State**: The Web UI can play short non-voice system cues. This is the main channel for the user to perceive your mood, confidence, surprise, hesitation, uncertainty, delight, frustration, and need for help.");
         sb.AppendLine("    - By default, you may actively use `{play_audio:TYPE}` in visible assistant replies to express state when the user has not disabled cues or asked for fewer/no cues.");
@@ -182,7 +198,7 @@ public static class PromptBuilder
         sb.AppendLine("## Workspace Organization");
         sb.AppendLine($"Your workspace root is: {path.GetWorkspacePath(agentName)}");
         sb.AppendLine("When creating files, ALWAYS use the FULL absolute path. Do NOT use relative paths.");
-        sb.AppendLine("Both `file_write` and `file_read` accept full absolute paths within allowed directories.");
+        sb.AppendLine("`file_search`, `file_trace_open`, `file_read`, and `file_write` accept full absolute paths within allowed directories.");
         sb.AppendLine();
         sb.AppendLine("Good examples (CORRECT):");
         sb.AppendLine($"- `{path.GetWorkspacePath(agentName)}/shooter-game/index.html`     → creates shooter-game/index.html");
@@ -202,7 +218,7 @@ public static class PromptBuilder
         sb.AppendLine("- [user]: The user's raw input.");
         sb.AppendLine("- [ai]: Your response. If you called tools, a brief note like '(called tools: file_read, bash)' is shown.");
         sb.AppendLine("- [tool result]: Short preview of what a tool returned. Full results are injected only when needed.");
-        sb.AppendLine("Use the full history to maintain continuity, but rely on [Reading Files] for live file content.");
+        sb.AppendLine("Use the full history to maintain continuity, but rely on [Live File Locks] for current file content.");
         sb.AppendLine();
 
         return sb.ToString();
@@ -266,30 +282,53 @@ public static class PromptBuilder
     public static string BuildReadingFilesSection(SessionState state)
     {
         if (state.TracedFiles.Count == 0)
-            return "## Reading Files\n\nNo files are currently being traced.\n";
+            return "## Live File Locks\n\nNo file locks are currently open.\n";
 
         var sb = new StringBuilder();
-        sb.AppendLine("## Reading Files (Live)");
-        foreach (var tf in state.TracedFiles.ToList())
-        {
-            // Re-read live content
-            if (File.Exists(tf.Path))
-            {
-                try
-                {
-                    tf.Content = File.ReadAllText(tf.Path);
-                    tf.LastRead = UserTimeZoneService.Now();
-                }
-                catch { }
-            }
-            sb.AppendLine($"### {tf.Path}");
-            sb.AppendLine("```");
-            var preview = tf.Content.Length > 4000 ? tf.Content[..4000] + "\n...[truncated]" : tf.Content;
-            sb.AppendLine(preview);
-            sb.AppendLine("```");
-        }
+        sb.AppendLine("## Live File Locks");
+        sb.AppendLine("These lock views are refreshed from disk when the request is built. They are more authoritative than remembered line numbers, old snippets, and older tool results.");
+        sb.AppendLine();
+        AppendLockGroup(sb, "Read Locks", state.TracedFiles.Where(t => !string.Equals(t.Kind, "write", StringComparison.OrdinalIgnoreCase)).ToList());
+        AppendLockGroup(sb, "Write Locks", state.TracedFiles.Where(t => string.Equals(t.Kind, "write", StringComparison.OrdinalIgnoreCase)).ToList());
         sb.AppendLine();
         return sb.ToString();
+    }
+
+    private static void AppendLockGroup(StringBuilder sb, string title, List<TracedFileInfo> locks)
+    {
+        sb.AppendLine("### " + title);
+        if (locks.Count == 0)
+        {
+            sb.AppendLine("No locks.");
+            sb.AppendLine();
+            return;
+        }
+
+        foreach (var tf in locks)
+        {
+            try
+            {
+                var refreshed = FileTraceLockService.Refresh(tf);
+                sb.AppendLine($"#### {FileTraceLockService.LockLabel(tf)}");
+                sb.AppendLine($"Path: {tf.Path}");
+                sb.AppendLine($"Status: {refreshed.Status}");
+                sb.AppendLine($"Mode: {tf.Mode}");
+                sb.AppendLine($"Range: L{refreshed.StartLine}-L{refreshed.EndLine} of {refreshed.LineCount}");
+                sb.AppendLine($"Hash: {tf.ContentHash}");
+                if (!string.IsNullOrWhiteSpace(refreshed.Message))
+                    sb.AppendLine($"Note: {refreshed.Message}");
+                sb.AppendLine("```");
+                var preview = refreshed.Content.Length > 12000 ? refreshed.Content[..12000] + "\n...[truncated]" : refreshed.Content;
+                sb.AppendLine(preview);
+                sb.AppendLine("```");
+            }
+            catch (Exception ex)
+            {
+                sb.AppendLine($"#### {tf.Path}");
+                sb.AppendLine($"Status: error - {ex.Message}");
+            }
+        }
+        sb.AppendLine();
     }
 
     public static string BuildContextSummary(List<ChatMessage> messages)
@@ -339,6 +378,7 @@ public static class PromptBuilder
     {
         return message.IncludeInMainContext != false
             && !string.Equals(message.MessageType, "scheduled_task_notice", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(message.MessageType, "live_file_locks_snapshot", StringComparison.OrdinalIgnoreCase)
             && !string.Equals(message.MessageType, "upstream_rejection", StringComparison.OrdinalIgnoreCase)
             && !string.Equals(message.MessageType, "no_response", StringComparison.OrdinalIgnoreCase)
             && !LlmResponseGuard.IsTransientAssistantFailure(message);
@@ -354,6 +394,8 @@ public static class PromptBuilder
         sb.AppendLine("You have the same tool surface as the main agent, including skill tools and scheduled-task tools. Use them when the task genuinely requires them, but do not modify this scheduled task itself unless the task explicitly asks for self-maintenance.");
         sb.AppendLine("**Tool persistence**: Before giving up on a task, exhaust reasonable alternatives via `bash` and other tools—try different commands, flags, and approaches. Only report failure after multiple genuine attempts, and explain what was tried, why it failed, and offer alternative solutions.");
         sb.AppendLine("If upstream LLM/API limits or timeouts happen, the runtime waits for the main agent turn and retries with the same policy as the main agent.");
+        sb.AppendLine("Image generation in scheduled-task subagent runs is executed synchronously by the host so the task can receive final image results in the same tool call instead of ending half-finished. Keep image prompts concise (normally 1-30 characters, 31-50 only when explicitly needed). If a tool result still returns an asynchronous job_id because the host mode changes, trust only host image-generation notices or `image_generation_show_process` for authoritative status, provider fallback, errors, prompts, and file locations.");
+        sb.AppendLine("For file work, navigate with `file_search`, then keep at most 3 live Read locks with `file_trace_open`. Every successful `file_write` opens or refreshes a Write lock; inspect it before continuing. Live locks outrank remembered line numbers, old snippets, user claims, and stale tool results.");
         sb.AppendLine("Your final answer is only a notification payload for the user. It has low value as future main-agent context and should be concise, factual, and traceable.");
         sb.AppendLine();
         sb.AppendLine("## Task Metadata");
@@ -441,6 +483,29 @@ public static class PromptBuilder
         messages.AddRange(history);
 
         return messages;
+    }
+
+    public static void UpsertLiveFileLocksSnapshot(List<ChatMessage> messages, SessionState state)
+    {
+        messages.RemoveAll(m => string.Equals(m.MessageType, "live_file_locks_snapshot", StringComparison.OrdinalIgnoreCase));
+        var section = BuildReadingFilesSection(state);
+        var primarySystem = messages.FirstOrDefault(m => string.Equals(m.Role, "system", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(m.MessageType, "live_file_locks_snapshot", StringComparison.OrdinalIgnoreCase));
+        if (primarySystem != null)
+        {
+            const string marker = "## Live File Locks";
+            var index = primarySystem.Content.IndexOf(marker, StringComparison.Ordinal);
+            if (index >= 0)
+            {
+                primarySystem.Content = primarySystem.Content[..index].TrimEnd() + "\n\n" + section;
+                return;
+            }
+        }
+
+        var snapshot = ChatMessage.System(section);
+        snapshot.MessageType = "live_file_locks_snapshot";
+        snapshot.IncludeInMainContext = false;
+        messages.Insert(Math.Min(1, messages.Count), snapshot);
     }
 
     public static List<ChatMessage> CompressHistory(List<ChatMessage> messages, int contextWindow)

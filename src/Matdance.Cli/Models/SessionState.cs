@@ -16,6 +16,17 @@ public class SessionState
     [JsonPropertyName("traced_files")]
     public List<TracedFileInfo> TracedFiles { get; set; } = new();
 
+    [JsonPropertyName("file_edit_audits")]
+    public List<FileEditAuditInfo> FileEditAudits { get; set; } = new();
+
+    public int ClearTraceLocks()
+    {
+        var count = TracedFiles.Count;
+        if (count > 0)
+            TracedFiles.Clear();
+        return count;
+    }
+
     public string GetStatePath(string sessionJsonPath) => Path.Combine(
         Path.GetDirectoryName(sessionJsonPath)!,
         Path.GetFileNameWithoutExtension(sessionJsonPath) + ".state.json"
@@ -41,6 +52,12 @@ public class SessionState
         {
             if (file.LastRead != default && file.LastRead != DateTimeOffset.MinValue)
                 file.LastRead = UserTimeZoneService.ToUserTime(file.LastRead);
+        }
+
+        foreach (var audit in FileEditAudits)
+        {
+            if (audit.Timestamp != default && audit.Timestamp != DateTimeOffset.MinValue)
+                audit.Timestamp = UserTimeZoneService.ToUserTime(audit.Timestamp);
         }
     }
 
@@ -79,12 +96,79 @@ public class ActiveTaskInfo
 
 public class TracedFileInfo
 {
+    [JsonPropertyName("id")]
+    public string Id { get; set; } = string.Empty;
+
+    [JsonPropertyName("kind")]
+    public string Kind { get; set; } = "read";
+
+    [JsonPropertyName("mode")]
+    public string Mode { get; set; } = "physical";
+
     [JsonPropertyName("path")]
     public string Path { get; set; } = string.Empty;
 
     [JsonPropertyName("content")]
     public string Content { get; set; } = string.Empty;
 
+    [JsonPropertyName("anchor")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Anchor { get; set; }
+
+    [JsonPropertyName("anchor_text")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? AnchorText { get; set; }
+
+    [JsonPropertyName("start_line")]
+    public int StartLine { get; set; } = 1;
+
+    [JsonPropertyName("end_line")]
+    public int EndLine { get; set; } = 1;
+
+    [JsonPropertyName("center_line")]
+    public int CenterLine { get; set; } = 1;
+
+    [JsonPropertyName("max_lines")]
+    public int MaxLines { get; set; } = 2000;
+
+    [JsonPropertyName("line_count")]
+    public int LineCount { get; set; }
+
+    [JsonPropertyName("status")]
+    public string Status { get; set; } = "fresh";
+
+    [JsonPropertyName("message")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Message { get; set; }
+
+    [JsonPropertyName("content_hash")]
+    public string ContentHash { get; set; } = string.Empty;
+
     [JsonPropertyName("last_read")]
     public DateTimeOffset LastRead { get; set; } = UserTimeZoneService.Now();
+}
+
+public class FileEditAuditInfo
+{
+    [JsonPropertyName("timestamp")]
+    public DateTimeOffset Timestamp { get; set; } = UserTimeZoneService.Now();
+
+    [JsonPropertyName("operation")]
+    public string Operation { get; set; } = string.Empty;
+
+    [JsonPropertyName("path")]
+    public string Path { get; set; } = string.Empty;
+
+    [JsonPropertyName("before_hash")]
+    public string BeforeHash { get; set; } = string.Empty;
+
+    [JsonPropertyName("after_hash")]
+    public string AfterHash { get; set; } = string.Empty;
+
+    [JsonPropertyName("diff")]
+    public string Diff { get; set; } = string.Empty;
+
+    [JsonPropertyName("write_lock_id")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? WriteLockId { get; set; }
 }

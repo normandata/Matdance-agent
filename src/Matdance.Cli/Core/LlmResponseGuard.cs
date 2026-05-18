@@ -118,7 +118,7 @@ public static class LlmResponseGuard
             return true;
         }
 
-        return Regex.IsMatch(text, @"(?is)\b(bash|file_read|file_write|browser_[a-z_]+|save_cookie|apply_cookie|list_cookie_by_site|task_manager|memory_store|skill_create|skill_editor|skill_delete|image_generation|text_to_speech)\s*\(", RegexOptions.CultureInvariant);
+        return Regex.IsMatch(text, @"(?is)\b(bash|file_(?:read|write|search|trace_open|trace_show|trace_close|write_locks|write_lock_close)|browser_[a-z_]+|save_cookie|apply_cookie|list_cookie_by_site|task_manager|memory_store|skill_create|skill_editor|skill_delete|image_generation(?:_[a-z_]+)?|text_to_speech)\s*\(", RegexOptions.CultureInvariant);
     }
 
     private static string Normalize(string? content)

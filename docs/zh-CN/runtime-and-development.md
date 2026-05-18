@@ -17,6 +17,16 @@ Web UI 支持四类模式：
 
 Windows 使用计划任务，macOS 使用 LaunchAgents。Linux 目前主要保存模式状态，不承诺发行版级守护体验。
 
+macOS 的 `autostart-keep-alive` 会注册到当前用户的 `~/Library/LaunchAgents`。注册时会写入 plist、设置权限、执行 `launchctl bootstrap`、`launchctl enable`，并在需要时 `kickstart`，这样它不是只在当前终端会话里临时存在，而是应在下一次用户登录后继续拉起 Web UI。
+
+公网/局域网暴露也走托管包装入口：
+
+```bash
+matdance web-ui start --public --port 8765
+```
+
+它会绑定 `0.0.0.0`，启用 token 鉴权，并打印 token 与 token 文件位置。
+
 ## Shadow 运行目录
 
 源码运行时，托管 Web UI 会从 `.matdance/web-ui-shadow/` 启动，避免长期占用 `src/Matdance.Cli/bin/...` 中的 DLL。源码包装入口在执行 build/run 前会尽量暂停正在运行的 Web UI，命令结束后再恢复原 host/port。

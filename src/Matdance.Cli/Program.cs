@@ -298,35 +298,45 @@ var webUiSupervisorStatus = new Command("status", "Show system-level supervisor 
 var webUiStartHostOpt = new Option<string>("--host", () => "localhost", "Host to bind (default: localhost)");
 var webUiStartPortOpt = new Option<int>("--port", () => 8765, "Port to bind (default: 8765)");
 var webUiStartModeOpt = new Option<string>("--mode", () => RuntimeSupervisorService.ModePreserve, "Run mode: preserve, fragile, keep-alive, autostart-keep-alive, keep-alive-no-autostart");
+var webUiStartPublicOpt = new Option<bool>("--public", "Expose Web UI on 0.0.0.0 with single-token authentication");
 var webUiRestartHostOpt = new Option<string>("--host", () => "localhost", "Host to bind (default: localhost)");
 var webUiRestartPortOpt = new Option<int>("--port", () => 8765, "Port to bind (default: 8765)");
 var webUiRestartModeOpt = new Option<string>("--mode", () => RuntimeSupervisorService.ModePreserve, "Run mode: preserve, fragile, keep-alive, autostart-keep-alive, keep-alive-no-autostart");
+var webUiRestartPublicOpt = new Option<bool>("--public", "Expose Web UI on 0.0.0.0 with single-token authentication");
 var webUiSuperviseHostOpt = new Option<string>("--host", () => "localhost", "Host to bind (default: localhost)");
 var webUiSupervisePortOpt = new Option<int>("--port", () => 8765, "Port to bind (default: 8765)");
 var webUiSuperviseKeepAliveOpt = new Option<bool>("--keep-alive", () => false, "Start Web UI if it is not running");
 var webUiSuperviseRunDueOpt = new Option<bool>("--run-due", () => false, "Run due scheduled tasks headlessly when Web UI is not available");
+var webUiSupervisePublicOpt = new Option<bool>("--public", "Expose keep-alive Web UI on 0.0.0.0 with single-token authentication");
 var webUiSupervisorEnableHostOpt = new Option<string>("--host", () => "localhost", "Host to bind (default: localhost)");
 var webUiSupervisorEnablePortOpt = new Option<int>("--port", () => 8765, "Port to bind (default: 8765)");
 var webUiSupervisorAutostartOpt = new Option<bool>("--autostart", () => false, "Also start and keep Web UI alive after user logon");
+var webUiSupervisorPublicOpt = new Option<bool>("--public", "Configure keep-alive/autostart for 0.0.0.0 with single-token authentication");
 webUiStart.AddOption(webUiStartHostOpt);
 webUiStart.AddOption(webUiStartPortOpt);
 webUiStart.AddOption(webUiStartModeOpt);
+webUiStart.AddOption(webUiStartPublicOpt);
 webUiRestart.AddOption(webUiRestartHostOpt);
 webUiRestart.AddOption(webUiRestartPortOpt);
 webUiRestart.AddOption(webUiRestartModeOpt);
+webUiRestart.AddOption(webUiRestartPublicOpt);
 webUiSupervise.AddOption(webUiSuperviseHostOpt);
 webUiSupervise.AddOption(webUiSupervisePortOpt);
 webUiSupervise.AddOption(webUiSuperviseKeepAliveOpt);
 webUiSupervise.AddOption(webUiSuperviseRunDueOpt);
+webUiSupervise.AddOption(webUiSupervisePublicOpt);
 webUiSupervisorEnable.AddOption(webUiSupervisorEnableHostOpt);
 webUiSupervisorEnable.AddOption(webUiSupervisorEnablePortOpt);
 webUiSupervisorEnable.AddOption(webUiSupervisorAutostartOpt);
-webUiStart.SetHandler(async (string host, int port, string mode, string? agentsDir) =>
+webUiSupervisorEnable.AddOption(webUiSupervisorPublicOpt);
+webUiStart.SetHandler(async (string host, int port, string mode, bool publicExposure, string? agentsDir) =>
 {
+    host = PrepareWebUiHost(host, publicExposure);
     var path = new PathService(agentsDir);
     var status = await new RuntimeSupervisorService(path).StartAsync(mode, host, port);
     Console.WriteLine(FormatWebUiStatus(status, "start requested"));
-}, webUiStartHostOpt, webUiStartPortOpt, webUiStartModeOpt, agentsDirOption);
+    PrintWebAuthStartupHint(host);
+}, webUiStartHostOpt, webUiStartPortOpt, webUiStartModeOpt, webUiStartPublicOpt, agentsDirOption);
 webUiStop.SetHandler(async (string? agentsDir) =>
 {
     await new WebUiProcessManager(new PathService(agentsDir)).StopAsync();
@@ -337,28 +347,34 @@ webUiStopAll.SetHandler(async (string? agentsDir) =>
     var status = await new RuntimeSupervisorService(new PathService(agentsDir)).StopAllAsync("localhost", 8765);
     Console.WriteLine($"[web-ui] stopped all: hook={status.HookEnabled} keepAlive={status.KeepAliveEnabled} autostart={status.AutostartEnabled} web={FormatWebUiStatus(status.WebUi, "status")}");
 }, agentsDirOption);
-webUiRestart.SetHandler(async (string host, int port, string mode, string? agentsDir) =>
+webUiRestart.SetHandler(async (string host, int port, string mode, bool publicExposure, string? agentsDir) =>
 {
+    host = PrepareWebUiHost(host, publicExposure);
     var path = new PathService(agentsDir);
     var status = await new RuntimeSupervisorService(path).RestartAsync(mode, host, port);
     Console.WriteLine(FormatWebUiStatus(status, "restart requested"));
-}, webUiRestartHostOpt, webUiRestartPortOpt, webUiRestartModeOpt, agentsDirOption);
+    PrintWebAuthStartupHint(host);
+}, webUiRestartHostOpt, webUiRestartPortOpt, webUiRestartModeOpt, webUiRestartPublicOpt, agentsDirOption);
 webUiStatus.SetHandler(async (string? agentsDir) =>
 {
     var status = await new WebUiProcessManager(new PathService(agentsDir)).GetStatusAsync();
     Console.WriteLine(FormatWebUiStatus(status, "status"));
 }, agentsDirOption);
-webUiSupervise.SetHandler(async (string host, int port, bool keepAlive, bool runDue, string? agentsDir) =>
+webUiSupervise.SetHandler(async (string host, int port, bool keepAlive, bool runDue, bool publicExposure, string? agentsDir) =>
 {
+    host = PrepareWebUiHost(host, publicExposure);
     var result = await new RuntimeSupervisorService(new PathService(agentsDir)).SuperviseAsync(keepAlive, runDue, host, port);
     Console.WriteLine($"[web-ui] supervise keepAlive={result.KeepAliveRequested} runDue={result.RunDueRequested} due={result.DueRun.DueCount} ran={result.DueRun.Ran} skipped={result.DueRun.Skipped} web={FormatWebUiStatus(result.WebUi, "supervise")}");
-}, webUiSuperviseHostOpt, webUiSupervisePortOpt, webUiSuperviseKeepAliveOpt, webUiSuperviseRunDueOpt, agentsDirOption);
-webUiSupervisorEnable.SetHandler(async (string host, int port, bool autostart, string? agentsDir) =>
+    if (keepAlive) PrintWebAuthStartupHint(host);
+}, webUiSuperviseHostOpt, webUiSupervisePortOpt, webUiSuperviseKeepAliveOpt, webUiSuperviseRunDueOpt, webUiSupervisePublicOpt, agentsDirOption);
+webUiSupervisorEnable.SetHandler(async (string host, int port, bool autostart, bool publicExposure, string? agentsDir) =>
 {
+    host = PrepareWebUiHost(host, publicExposure);
     var mode = autostart ? RuntimeSupervisorService.ModeAutostartKeepAlive : RuntimeSupervisorService.ModeKeepAliveNoAutostart;
     await new RuntimeSupervisorService(new PathService(agentsDir)).ConfigureSystemTasksAsync(mode, host, port);
-    Console.WriteLine(autostart ? "[web-ui] supervisor enabled with autostart" : "[web-ui] supervisor enabled without autostart");
-}, webUiSupervisorEnableHostOpt, webUiSupervisorEnablePortOpt, webUiSupervisorAutostartOpt, agentsDirOption);
+    Console.WriteLine(autostart ? "[web-ui] supervisor enabled with autostart" : "[web-ui] autostart disabled; persistent boot/logon tasks removed");
+    PrintWebAuthStartupHint(host);
+}, webUiSupervisorEnableHostOpt, webUiSupervisorEnablePortOpt, webUiSupervisorAutostartOpt, webUiSupervisorPublicOpt, agentsDirOption);
 webUiSupervisorDisable.SetHandler(async (string? agentsDir) =>
 {
     await new RuntimeSupervisorService(new PathService(agentsDir)).ConfigureSystemTasksAsync(RuntimeSupervisorService.ModeFragile, "localhost", 8765);
@@ -383,11 +399,16 @@ webUiCommand.AddCommand(webUiSupervisor);
 // ===== Dependency Commands =====
 var depsCommand = new Command("deps", "Install local runtime dependencies under the Matdance install root");
 var depsInstall = new Command("install", "Install Playwright browser dependencies");
-var depsSourceOpt = new Option<string>("--source", () => "global", "Download source: global or cn");
+var depsSourceOpt = new Option<string>("--source", () => "auto", "Download source: auto, global, or cn");
 depsInstall.AddOption(depsSourceOpt);
 depsInstall.SetHandler(async (string source) =>
 {
-    var selected = source.Equals("cn", StringComparison.OrdinalIgnoreCase) ? DependencySource.Cn : DependencySource.Global;
+    var selected = source.Trim().ToLowerInvariant() switch
+    {
+        "cn" or "china" => DependencySource.Cn,
+        "global" or "official" => DependencySource.Global,
+        _ => DependencySource.Auto
+    };
     await new DependencyInstallerService().InstallAsync(selected, Console.WriteLine);
 }, depsSourceOpt);
 depsCommand.AddCommand(depsInstall);
@@ -459,6 +480,32 @@ static async Task RunTerminalChatAsync(PathService path)
     var (agentName, sessionId, sessionData, sessionState, config) = await wizard.RunAsync();
     var loop = new ChatLoop(agentName, sessionId, sessionData, sessionState, config, path);
     await loop.RunAsync();
+}
+
+static string PrepareWebUiHost(string host, bool publicExposure)
+{
+    if (publicExposure)
+        host = "0.0.0.0";
+
+    if (WebAuthService.IsRemoteBinding(host))
+    {
+        Environment.SetEnvironmentVariable("MATDANCE_ALLOW_REMOTE_WEB", "1");
+        WebAuthService.LoadOrCreate(host);
+    }
+
+    return host;
+}
+
+static void PrintWebAuthStartupHint(string host)
+{
+    if (!WebAuthService.IsRemoteBinding(host))
+        return;
+
+    var auth = WebAuthService.LoadOrCreate(host);
+    Console.WriteLine($"[web-auth] single-token authentication enabled source={auth.Source}");
+    if (!string.IsNullOrWhiteSpace(auth.TokenForLocalDisplay))
+        Console.WriteLine($"[web-auth] token: {auth.TokenForLocalDisplay}");
+    Console.WriteLine($"[web-auth] token file: {WebAuthService.StatePath}");
 }
 
 static string FormatWebUiStatus(WebUiStatus status, string fallback)

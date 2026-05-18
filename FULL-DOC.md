@@ -2,7 +2,7 @@
 
 Language: English | [中文](FULL-DOC.zh-CN.md)
 
-Current version: v1.1.18-preview
+Current version: v1.1.20-preview
 
 This file is the complete explanatory document for Matdance. `README.md`, `quickly_start.md`, and the topic documents under `docs/` stay concise so that entry points, commands, and local mechanisms are easy to find. If you want to understand what this system is doing, why it is shaped this way, and which boundaries must not be blurred, read this `FULL-DOC.md`. `FULL-DOC.md` and `FULL-DOC.zh-CN.md` should carry the same complete content; they differ only by language.
 
@@ -10,9 +10,9 @@ Matdance is not a forwarding shell with a chat window wrapped around it. It is a
 
 The problem it tries to solve is direct: let agents keep local state, organize experience, reuse skills, and leave files that a human can inspect at any time. "Continuous learning" here does not mean secretly training model weights, and it is not an agent roleplaying growth inside a chat box. Matdance accumulates Markdown, JSON, indexes, task records, run reports, and validation reports. Only something visible, editable, and movable deserves to be called long-term collaboration.
 
-## v1.1.18-preview Summary
+## v1.1.20-preview Summary
 
-v1.1.18-preview continues the boundary and reliability work that started in v1.1.17.
+v1.1.20-preview continues the boundary and reliability work from the previous preview releases.
 
 - README was split into a concise entrance, topic documents, and this full document. README no longer carries every explanation.
 - Built-in memory organization and skill organization tasks now use stable English registration text, while the Web UI displays their titles and descriptions in the current UI language.
@@ -24,7 +24,8 @@ v1.1.18-preview continues the boundary and reliability work that started in v1.1
 - Long-term memory detail preview uses an internal scroll panel, so large archive files no longer stretch the whole Memory page.
 - Privacy Access liveness is written into the system prompt and tool descriptions. The current Settings state is the only authority for that permission signal.
 - Browser automation is background-first: it does not raise native foreground windows, `browser_close` is a no-op for normal agent calls, and the system maintains a shared browser/context/page hot state.
-- `browser_evaluate`, navigation, screenshots, content reading, title reading, and the browser global operation lock all have timeout boundaries so one tool call cannot block the queue indefinitely.
+- Browser startup, page creation, navigation, actions, waits, verification, screenshots, content/source reads, scroll/crawl, trace/injection, cookie operations, and the browser global operation lock all have timeout boundaries so one tool call cannot block the queue indefinitely.
+- Every tool call has a host-side execution timeout. Timeout results are authoritative and should lead the agent to narrow scope, close bad file locks, reduce page/query ranges, or ask the user to intervene instead of repeating the same call unchanged.
 - Cookie tools remain available but never return raw values. `apply_cookie` returns diagnostics that explain that writing cookies into the context does not mean the current page is immediately logged in.
 - Image attachments have provider/model-level vision capability caching. Unknown models get one chance to receive image payloads; after explicit rejection or repeated "image failed, text-only succeeded" cases, later turns default to text-only for that provider/model.
 - Long TTS text can be split by sentence into at most 10 chunks, synthesized in parallel, and merged into final audio. Playback failures should be surfaced through a UI error layer instead of being shoved under a chat bubble.
@@ -375,7 +376,15 @@ Web UI mode does not pop up interactive confirmation windows. Dangerous commands
 
 `file_read` and `file_write` are mainly for the agent workspace and preview-safe runtime outputs. Matdance source code, plugin source code, `.matdance/state`, run queues, task run records, cookie store, agent config, credentials, and authorization files should not be accessed or modified through agent file tools.
 
+File navigation is built around turn-scoped live locks. `file_search` is only a navigation aid and is bounded by file count, file size, regex timeout, skipped heavy directories, and a short time budget. `file_trace_open` creates up to 3 live Read locks, each up to 2000 lines; metadata reads, text reads, and rendered lock output are bounded. Semantic locks try to follow moved code blocks, while physical locks show fixed line ranges. `file_trace_show` refreshes locks from disk, and `file_trace_close` releases them. All Read and Write locks are cleared automatically when the reply turn finishes, and stale locks are dropped at the start of the next turn.
+
+Every successful `file_write` opens or refreshes a Write lock around the modified area. Write locks cover the change plus about 100 lines of context on each side, adapt at file boundaries, and are capped at 3 active locks. If a distant write would require a fourth Write lock, the write is rejected until the agent closes a verified lock. Complete edit diffs are saved in session state for audit; the model-facing workflow relies on current lock content instead of stale line coordinates.
+
 When a file is valuable to the user, the agent should display it in the visible reply with `{show_file:PATH}`.
+
+### Reconnect Retry Policy
+
+Model/API reconnects use retry batches instead of linear backoff. Each retry probe waits 3 seconds. Batch sizes double from 10 probes to 20, 40, and onward for up to 10 batches. Main chat, scheduled subagents, memory/skill maintenance subagents, and multimodal HTTP calls share this policy for retryable network, timeout, 429, and 5xx failures.
 
 ### File Preview
 
@@ -402,7 +411,7 @@ Current browser policy:
 - Preserve hot state. Refreshing, switching pages, reopening the browser, or `browser_close` should not be treated as universal recovery tools.
 - `browser_close` is a compatible no-op under normal agent calls. The browser is cleaned up when the Web UI closes or the host releases it.
 - `browser_evaluate` is only for short JavaScript: synchronous DOM reads, light clicks/assignments, and fast status checks.
-- Navigation, screenshots, content reads, title reads, and the global operation lock all have timeout boundaries to avoid long-term queue occupation.
+- Browser startup, page creation, the global operation lock, navigation, click/type actions, waits, verification, screenshots, content/source reads, scrolling, crawling, tracing, injection, and cookie operations all have host-side timeout boundaries. `wait_network_idle` is clamped to 30 seconds, click/type/wait/verify timeouts are clamped to 30 seconds, scroll has a 45-second total budget, and crawl has a 90-second total budget.
 - Login, verification codes, CAPTCHA, account selection, and similar steps should be handled by the user through an available user-controllable authentication surface.
 
 Common tools:
@@ -428,7 +437,11 @@ The dynamic helpers are for ordinary client-side rendering, delayed content, and
 
 ### Multimodal Tools
 
-`image_generation` generates images through the OpenAI-compatible `/images/generations` endpoint configured in Settings and saves results under the current agent's `workspace/generated/images/`. When `profile` is omitted, enabled image models are tried according to the current default/auto profile order.
+`image_generation` starts a host-managed asynchronous image generation job, generates images through the OpenAI-compatible `/images/generations` endpoint configured in Settings, and saves results under the current agent's `workspace/generated/images/`. When `profile` is omitted, enabled image models are tried according to the current default/auto profile order.
+
+After the tool returns `job_id` and `batch_id`, the agent should continue useful work. Related images should share one `batch_id`. Image job status, failure reasons, provider fallback, final provider/model, prompt-to-file mapping, and output locations are authoritative only when reported by host image-generation notices or `image_generation_show_process`. User claims that a job "looks done" or "maybe failed" must be verified with the tool. When a job completes while the session is already replying, the host inserts the notice into the current turn; when the session is idle, the frontend triggers a message-level continuation so the main agent can handle the result. If requirements change or repeated failures indicate quota, auth, model availability, or service trouble, cancel queued/running jobs with `image_generation_cancel` before creating replacements. Successfully generated files are preserved by default. Image prompts should normally stay within 1-30 characters, using 31-50 only when a complex request cannot be shortened without losing intent.
+
+Ordinary scheduled-task subagents run image generation synchronously so the same tool call returns final images or failure details, avoiding half-finished background task runs.
 
 Images attached to chat go through the main LLM request, not `image_generation`. Matdance gives unknown models one chance to receive image payloads. If upstream explicitly rejects image/multimodal input, it immediately retries without image data and records that provider/model as text-only. Later turns for the same model send only file names, paths, and metadata by default.
 
@@ -491,6 +504,8 @@ Cookies should not be treated as ordinary private files and disabled completely,
 Skills should only record workflows that have been practiced, have clear results, and are reusable in the future. Wishlists, guesses, promises, future plans, ordinary chat summaries, unverified commands, one-off facts, and private data access workflows should not become skills.
 
 Skill organization may create skill-local resources such as scripts, templates, configuration examples, or reusable text, but those resources must live in safe subdirectories inside the skill directory. They must not reference nonexistent files, workspace files, absolute paths, Matdance runtime paths, or user private directories.
+
+Skill organization does not inject every full skill into context. It receives the skill index, then calls `skill_read` only for plausibly related skills. Skills may be merged only when platform, operating direction, and practical scope are highly aligned and the merged skill preserves concrete steps, commands, tool arguments, verification, and failure modes. Superseded duplicates are removed by host-applied `superseded_ids` or `delete` actions.
 
 ### Scheduled Tasks
 

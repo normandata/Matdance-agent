@@ -1155,20 +1155,25 @@ public static class WebPage
     .sound-cue-toggle input { width: 18px; height: 18px; accent-color: var(--green); flex: 0 0 auto; }
     .sound-cue-toggle span, .sound-cue-toggle span:last-child { flex: 1 1 auto; max-width: none; overflow: visible; text-align: left; white-space: normal; }
     .sound-cue-volume, .sound-cue-delay { display: grid; gap: 7px; }
-    .sound-cue-volume input, .sound-cue-delay input { width: 100%; accent-color: var(--cyan); }
+    .sound-cue-volume input, .sound-cue-delay input { width: 100%; height: 28px; accent-color: var(--cyan); }
+    .sound-cue-volume input[type="range"], .sound-cue-delay input[type="range"] { -webkit-appearance: none; appearance: none; background: transparent; cursor: pointer; }
+    .sound-cue-volume input[type="range"]::-webkit-slider-runnable-track, .sound-cue-delay input[type="range"]::-webkit-slider-runnable-track { height: 6px; border-radius: 999px; background: linear-gradient(90deg, rgba(100,219,255,.78), rgba(103,247,177,.64)); box-shadow: inset 0 0 0 1px rgba(255,255,255,.12); }
+    .sound-cue-volume input[type="range"]::-webkit-slider-thumb, .sound-cue-delay input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 18px; height: 18px; margin-top: -6px; border-radius: 50%; border: 2px solid rgba(5,11,22,.94); background: #e7fbff; box-shadow: 0 3px 12px rgba(0,0,0,.35); }
+    .sound-cue-volume input[type="range"]::-moz-range-track, .sound-cue-delay input[type="range"]::-moz-range-track { height: 6px; border: 0; border-radius: 999px; background: linear-gradient(90deg, rgba(100,219,255,.78), rgba(103,247,177,.64)); box-shadow: inset 0 0 0 1px rgba(255,255,255,.12); }
+    .sound-cue-volume input[type="range"]::-moz-range-thumb, .sound-cue-delay input[type="range"]::-moz-range-thumb { width: 16px; height: 16px; border-radius: 50%; border: 2px solid rgba(5,11,22,.94); background: #e7fbff; box-shadow: 0 3px 12px rgba(0,0,0,.35); }
     .sound-cue-list-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; min-height: 100%; align-items: start; }
     .sound-cue-library-actions { display: inline-flex; align-items: center; justify-content: flex-end; gap: 8px; align-self: start; }
     .sound-cue-library-actions button { width: auto; min-height: 34px; border-radius: 11px; padding: 7px 12px; }
     .sound-cue-list { min-width: 0; }
     .sound-cue-list { grid-column: 1 / -1; }
-    .sound-cue-board { display: grid; grid-template-columns: 1fr; gap: 12px; align-items: start; }
+    .sound-cue-board { display: grid; grid-template-columns: 1fr; gap: 12px; align-items: start; min-height: clamp(380px, 48vh, 560px); }
     .sound-cue-group-nav { min-width: 0; display: flex; gap: 8px; padding: 8px; border: 1px solid rgba(255,255,255,.08); border-radius: 18px; background: rgba(3,7,16,.18); overflow-x: auto; }
     .sound-cue-group-tab { flex: 0 0 clamp(132px, 18%, 180px); min-height: 48px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 9px 10px; border-radius: 13px; color: var(--soft); background: transparent; border-color: transparent; box-shadow: none; text-align: left; }
     .sound-cue-group-tab:hover:not(:disabled) { transform: translateY(-1px); border-color: rgba(103,247,177,.18); background: rgba(255,255,255,.045); }
     .sound-cue-group-tab.active { color: var(--ink); border-color: rgba(103,247,177,.32); background: linear-gradient(135deg, rgba(103,247,177,.13), rgba(100,219,255,.08)); box-shadow: inset 0 1px 0 rgba(255,255,255,.055); }
     .sound-cue-group-tab-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 830; line-height: 1.2; }
     .sound-cue-group-tab-count { min-width: 22px; min-height: 22px; display: grid; place-items: center; padding: 0 6px; border-radius: 999px; color: var(--faint); background: rgba(255,255,255,.06); font-size: 10px; font-family: ui-monospace,SFMono-Regular,Consolas,monospace; }
-    .sound-cue-group-panel { min-width: 0; display: grid; gap: 10px; padding: 12px; border: 1px solid rgba(255,255,255,.085); border-radius: 20px; background: linear-gradient(135deg, rgba(255,255,255,.038), rgba(3,7,16,.20)); }
+    .sound-cue-group-panel { min-width: 0; min-height: clamp(300px, 38vh, 470px); display: grid; gap: 10px; align-content: start; padding: 12px; border: 1px solid rgba(255,255,255,.085); border-radius: 20px; background: linear-gradient(135deg, rgba(255,255,255,.038), rgba(3,7,16,.20)); }
     .sound-cue-group-head { display: grid; grid-template-columns: minmax(0,var(--phi-fr)) minmax(92px,var(--unit-fr)); gap: 10px; align-items: end; }
     .sound-cue-group-title { color: var(--ink); font-size: 13px; font-weight: 860; line-height: 1.25; }
     .sound-cue-group-desc { color: var(--soft); font-size: 11px; line-height: 1.45; }
@@ -1843,7 +1848,7 @@ public static class WebPage
           <div class="composer-actions">
             <div class="file-zone">
               <button id="attachButton" class="ghost attach-btn" type="button" title="Attach files" aria-label="Attach files">+</button>
-              <input id="chatAttachmentInput" class="chat-attachment-input" type="file" multiple accept=".zip,.png,.jpg,.jpeg,.webp,.gif,.bmp,.txt,.md,.markdown,.pdf,.doc,.docx,.rtf,.csv,.json,.xml,.yaml,.yml,.toml,.xls,.xlsx,.ppt,.pptx,image/png,image/jpeg,image/webp,image/gif,image/bmp,text/plain,text/markdown,application/pdf,application/zip" />
+              <input id="chatAttachmentInput" class="chat-attachment-input" type="file" multiple />
               <div id="attachmentStrip" class="attachment-strip"><span class="attachment-empty" id="hint">本地 Web UI 已连接。</span></div>
             </div>
             <div class="composer-buttons">
@@ -2399,7 +2404,7 @@ public static class WebPage
       const languages = Array.isArray(navigator.languages) && navigator.languages.length ? navigator.languages : [navigator.language || navigator.userLanguage || ''];
       return languages.some(lang => String(lang || '').toLowerCase().startsWith('zh')) ? 'zh' : 'en';
     }
-    const state = { agents: [], sessions: [], agent: null, session: null, busy: false, abortController: null, matrixTimer: null, commandIndex: 0, activeTab: 'home', settingsSection: 'general', runtimeEventsTimer: null, runtimeEventsAgent: null, schedulePage: 1, schedulePageSize: 8, scheduledTasks: null, scheduledSelected: null, lang: preferredLanguage(), memoryTab: 'core', memoryPage: 1, memoryPageSize: 10, memoryItems: null, memorySelectedItem: null, memorySnapshots: [], memoryVectorAtlas: null, memoryVectorResults: null, memoryVectorHover: null, memoryVectorPinned: null, memoryOrganizing: false, skillsWorking: false, skillsLearnFiles: [], selectedSkillValidationReport: null, selectedSkillImportReport: null, browserOpen: false, browserWs: null, browserMaximized: false, chatNearBottom: true, chatFollowStream: true, chatUserScrollIntentAt: 0, chatProgrammaticScrollUntil: 0, suppressChatAutoScroll: false, chatAttachments: [], multimodal: null, securitySettings: null, modelProviders: [], audioPlayer: null, audioUrl: null, audioButton: null, ttsErrorTimer: null, soundCues: null, soundCueGroup: 'flow', soundCuePlayer: null, soundCueQueue: [], soundCuePlaying: false, soundCuePrimed: false, soundCueBlocked: false, soundCueUploadType: null, soundCueSaveTimer: null, soundCueLastPlayedAt: {}, soundCueIdleResolvers: [], scheduledNoticeKeys: new Set(), recorder: null, recordChunks: [], voiceMode: false, voiceRecording: false, voiceCanceled: false, voiceStartY: 0, voiceStartAt: 0, voiceTimer: null, voiceSession: null, voicePointerId: null, labRecorder: null, labRecordChunks: [] };
+    const state = { agents: [], sessions: [], agent: null, session: null, busy: false, abortController: null, matrixTimer: null, commandIndex: 0, activeTab: 'home', settingsSection: 'general', runtimeEventsTimer: null, runtimeEventsAgent: null, schedulePage: 1, schedulePageSize: 8, scheduledTasks: null, scheduledSelected: null, lang: preferredLanguage(), memoryTab: 'core', memoryPage: 1, memoryPageSize: 10, memoryItems: null, memorySelectedItem: null, memorySnapshots: [], memoryVectorAtlas: null, memoryVectorResults: null, memoryVectorHover: null, memoryVectorPinned: null, memoryOrganizing: false, skillsWorking: false, skillsLearnFiles: [], selectedSkillValidationReport: null, selectedSkillImportReport: null, browserOpen: false, browserWs: null, browserMaximized: false, chatNearBottom: true, chatFollowStream: true, chatUserScrollIntentAt: 0, chatProgrammaticScrollUntil: 0, suppressChatAutoScroll: false, chatAttachments: [], multimodal: null, securitySettings: null, modelProviders: [], audioPlayer: null, audioUrl: null, audioButton: null, ttsErrorTimer: null, soundCues: null, soundCueGroup: 'flow', soundCuePlayer: null, soundCueQueue: [], soundCuePlaying: false, soundCuePrimed: false, soundCueBlocked: false, soundCueUploadType: null, soundCueSaveTimer: null, soundCueLastPlayedAt: {}, soundCueIdleResolvers: [], scheduledNoticeKeys: new Set(), imageNoticeKeys: new Set(), hostNoticeContinuationRunning: false, recorder: null, recordChunks: [], voiceMode: false, voiceRecording: false, voiceCanceled: false, voiceStartY: 0, voiceStartAt: 0, voiceTimer: null, voiceSession: null, voicePointerId: null, labRecorder: null, labRecordChunks: [] };
     const APP_DESIGN_WIDTH = 1360;
     const APP_DESIGN_HEIGHT = 995;
     function updateAppScale() {
@@ -2505,8 +2510,8 @@ public static class WebPage
     Object.assign(i18n.en,{thinkingBlock:'Thinking',thinkingComplete:'Thinking complete'});
     Object.assign(i18n.zh,{stopResponse:'\u505c\u6b62',stopped:'\u5df2\u505c\u6b62',stopping:'\u6b63\u5728\u505c\u6b62...',stoppedMessage:'\u54cd\u5e94\u5df2\u624b\u52a8\u505c\u6b62\u3002'});
     Object.assign(i18n.en,{stopResponse:'Stop',stopped:'stopped',stopping:'stopping...',stoppedMessage:'Response stopped manually.'});
-    Object.assign(i18n.zh,{attachFiles:'添加附件',filesEmpty:'文件区：最多 3 个附件',fileLimit:'最多只能添加 3 个附件。',fileUnsupported:'不支持的附件类型',fileDuplicate:'已忽略重复附件',fileTooLarge:'附件过大',fileImage:'图片',fileDocument:'文档',fileArchive:'压缩包',fileAttachment:'附件'});
-    Object.assign(i18n.en,{attachFiles:'Attach files',filesEmpty:'Files: up to 3 attachments',fileLimit:'At most 3 attachments are allowed.',fileUnsupported:'Unsupported attachment type',fileDuplicate:'Duplicate attachment ignored',fileTooLarge:'Attachment is too large',fileImage:'Image',fileDocument:'Document',fileArchive:'Archive',fileAttachment:'Attachment'});
+    Object.assign(i18n.zh,{attachFiles:'添加附件',filesEmpty:'文件区：最多 3 个附件',fileLimit:'最多只能添加 3 个附件。',fileUnsupported:'不支持的附件类型',fileDuplicate:'已忽略重复附件',fileTooLarge:'附件过大',fileTotalTooLarge:'附件总大小超过限制',fileImage:'图片',fileDocument:'文档',fileArchive:'压缩包',fileAttachment:'附件'});
+    Object.assign(i18n.en,{attachFiles:'Attach files',filesEmpty:'Files: up to 3 attachments',fileLimit:'At most 3 attachments are allowed.',fileUnsupported:'Unsupported attachment type',fileDuplicate:'Duplicate attachment ignored',fileTooLarge:'Attachment is too large',fileTotalTooLarge:'Total attachment size is too large',fileImage:'Image',fileDocument:'Document',fileArchive:'Archive',fileAttachment:'Attachment'});
     Object.assign(i18n.zh,{tagScheduleName:'Schedule',tagScheduleDescription:'定时任务列表、执行历史、toolcall轨迹和低权重结果通知。',
       scheduleTitle:'定时任务',scheduleSubtitle:'分页管理定时任务；结果是低权重通知，会等待主Agent回合结束后再投递。',scheduleListTitle:'任务列表',scheduleQueueLabel:'QUEUE',scheduleTraceLabel:'TRACE',scheduleTaskSpecLabel:'TASK SPEC',
       scheduleReload:'刷新',schedulePrev:'上一页',scheduleNext:'下一页',scheduleSaveTask:'保存任务',scheduleNewTask:'新建',
@@ -2558,7 +2563,7 @@ public static class WebPage
       scheduleActionEdit:'编辑',scheduleActionRead:'查看',scheduleActionTest:'测试',scheduleActionDelete:'删除',scheduleCreatedPrefix:'已创建',scheduleNone:'无',
       scheduleMoreSuffix:'更多',scheduleRunStatusSucceeded:'成功',scheduleRunStatusFailed:'失败',scheduleRunStatusRunning:'运行中',scheduleRunStatusUnknown:'未知',
       skillsReload:'刷新',skillsOrganize:'整理',skillsPhaseLabel:'可编辑',skillsEditorLabel:'技能编辑',skillsLibraryLabel:'技能库',skillsPreviewLabel:'预览',skillsNamePlaceholder:'技能名称（如：React组件开发规范）',skillsTagsPlaceholder:'逗号分隔，如: frontend, react, best-practice',
-      skillsDescPlaceholder:'一句话描述这个技能的用途和使用场景',skillsContentPlaceholder:'## 概述\n\n详细的工作流程、最佳实践、代码示例...\n\n## 步骤\n\n1. ...\n2. ...\n\n## 示例\n\n```javascript\n// 代码示例\n```',
+      skillsDescPlaceholder:'一句话描述这个技能的用途和使用场景',skillsContentPlaceholder:'## When to Use\n\n这个技能适用的任务场景。\n\n## Preconditions\n\n需要先确认的环境、权限、输入和依赖。\n\n## Workflow\n\n1. 可复现步骤。\n2. 决策分支和检查点。\n\n## Tools and Parameters\n\n- tool_name: 关键参数、返回值格式、成功/失败信号。\n\n## Expected Outputs\n\n用户或后续 Agent 应该拿到什么结果。\n\n## Failure Handling\n\n常见错误、诊断顺序、停止条件。\n\n## Boundaries\n\n不适用场景、隐私/凭据/安全边界。',
       skillsActionLoad:'加载',skillsActionExport:'导出',skillsActionDelete:'删除',skillsActionValidate:'验证并修复',skillsStateLoading:'加载中...',skillsLoadFailedPrefix:'加载失败',skillsLoadedPrefix:'已加载',skillsReadFailedPrefix:'读取失败',
       skillsUpdated:'已更新',skillsCreated:'已创建',skillsExported:'技能已导出',skillsExportFailedPrefix:'技能导出失败',skillsDeleteConfirm:'确定要删除这个技能吗？此操作不可撤销。',skillsSelectFirst:'请先选择一个技能',skillsOrganizeTitle:'整理技能中...',skillsOrganizeDesc:'正在分析近期会话并提取可复用技能',
       skillsValidateTitle:'验证并修复技能中...',skillsValidateDesc:'子代理正在尝试复现该技能、生成报告，并在边界明确时返回可应用的 skill-local 修复。',skillsJobPrepare:'准备中...',skillsOrganizeChecking:'检查主 Agent 状态...',skillsOrganizeBusy:'主 Agent 正在回复，请等待...',skillsOrganizeStarted:'技能整理任务已启动',
@@ -2577,7 +2582,7 @@ public static class WebPage
       scheduleActionEdit:'Edit',scheduleActionRead:'View',scheduleActionTest:'Test',scheduleActionDelete:'Delete',scheduleCreatedPrefix:'Created',scheduleNone:'none',
       scheduleMoreSuffix:'more',scheduleRunStatusSucceeded:'Succeeded',scheduleRunStatusFailed:'Failed',scheduleRunStatusRunning:'Running',scheduleRunStatusUnknown:'Unknown',
       skillsReload:'Reload',skillsOrganize:'Organize',skillsPhaseLabel:'editable',skillsEditorLabel:'SKILL EDITOR',skillsLibraryLabel:'SKILL LIBRARY',skillsPreviewLabel:'PREVIEW',skillsNamePlaceholder:'Skill name, for example React component guidelines',skillsTagsPlaceholder:'Comma-separated, for example frontend, react, best-practice',
-      skillsDescPlaceholder:'Describe what this skill is for and when to use it',skillsContentPlaceholder:'## Overview\n\nDetailed workflow, best practices, code examples...\n\n## Steps\n\n1. ...\n2. ...\n\n## Example\n\n```javascript\n// code example\n```',
+      skillsDescPlaceholder:'Describe what this skill is for and when to use it',skillsContentPlaceholder:'## When to Use\n\nTask situations where this skill applies.\n\n## Preconditions\n\nEnvironment, permissions, inputs, and dependencies to confirm first.\n\n## Workflow\n\n1. Reproducible steps.\n2. Decision branches and checkpoints.\n\n## Tools and Parameters\n\n- tool_name: important parameters, output shape, success/failure signals.\n\n## Expected Outputs\n\nWhat the user or a future agent should receive.\n\n## Failure Handling\n\nCommon errors, diagnostic order, and stop conditions.\n\n## Boundaries\n\nWhen not to use this skill; privacy, credential, and safety limits.',
       skillsActionLoad:'Load',skillsActionExport:'Export',skillsActionDelete:'Delete',skillsActionValidate:'Validate + Repair',skillsStateLoading:'Loading...',skillsLoadFailedPrefix:'Load failed',skillsLoadedPrefix:'Loaded',skillsReadFailedPrefix:'Read failed',
       skillsUpdated:'Updated',skillsCreated:'Created',skillsExported:'Skill exported',skillsExportFailedPrefix:'Skill export failed',skillsDeleteConfirm:'Delete this skill? This cannot be undone.',skillsSelectFirst:'Select a skill first',skillsOrganizeTitle:'Organizing skills...',skillsOrganizeDesc:'Analyzing recent sessions and extracting reusable skills',
       skillsValidateTitle:'Validating and repairing skill...',skillsValidateDesc:'A subagent is trying to reproduce the skill, generate a report, and return safe skill-local repairs when the boundary is clear.',skillsJobPrepare:'Preparing...',skillsOrganizeChecking:'Checking main Agent status...',skillsOrganizeBusy:'Main Agent is replying. Please wait...',skillsOrganizeStarted:'Skill organization task started',
@@ -2590,6 +2595,24 @@ public static class WebPage
       toolStatusRunning:'running',toolStatusDone:'done',toolStatusError:'error',toolStatusSkipped:'skipped',toolStatusCalled:'called',noOutput:'no output',summaryTruncated:'summary truncated',
       noticeTaskLabel:'Task',noticeStatusLabel:'Status',noticeRunIdLabel:'Run ID',noticeScheduledAtLabel:'Scheduled at',noticeCompletedAtLabel:'Completed at',noticeCatchUpLabel:'Catch-up reason',
       blankClosedTitle:'Closed Test Page',blankMinimizedTitle:'Minimized Test Page',blankActionText:'This is a test blank page triggered by the window control. Use Back to return.'
+    });
+    Object.assign(i18n.zh,{
+      imageNoticeMeta:'图像生成',imageNoticeBadge:'图像任务',imageNoticeTitle:'图像生成宿主通知',
+      imageNoticeJobId:'任务 ID',imageNoticeBatchId:'批次 ID',imageNoticeStatus:'状态',imageNoticeBatchStatus:'批次状态',
+      imageNoticePrompt:'提示词',imageNoticeRequestedProfile:'请求 profile',imageNoticeFallback:'Provider 回退',imageNoticeProvider:'最终 provider/model',
+      imageNoticeError:'错误',imageNoticeErrorCategory:'错误分类',imageNoticeFiles:'生成文件',imageNoticeBatchFiles:'批次生成文件',
+      imageNoticeAuthority:'这是图像任务的宿主权威状态。',imageStatusQueued:'排队中',imageStatusRunning:'运行中',imageStatusSucceeded:'成功',
+      imageStatusFailed:'失败',imageStatusCanceled:'已取消',imageStatusComplete:'已完成',imageStatusActive:'进行中',
+      imageBatchSucceeded:'成功',imageBatchFailed:'失败',imageBatchCanceled:'取消',yes:'是'
+    });
+    Object.assign(i18n.en,{
+      imageNoticeMeta:'Image generation',imageNoticeBadge:'Image job',imageNoticeTitle:'Image Generation Host Notice',
+      imageNoticeJobId:'Job ID',imageNoticeBatchId:'Batch ID',imageNoticeStatus:'Status',imageNoticeBatchStatus:'Batch status',
+      imageNoticePrompt:'Prompt',imageNoticeRequestedProfile:'Requested profile',imageNoticeFallback:'Provider fallback',imageNoticeProvider:'Final provider/model',
+      imageNoticeError:'Error',imageNoticeErrorCategory:'Error category',imageNoticeFiles:'Generated files',imageNoticeBatchFiles:'Batch generated files',
+      imageNoticeAuthority:'This is authoritative host state for the image job.',imageStatusQueued:'Queued',imageStatusRunning:'Running',imageStatusSucceeded:'Succeeded',
+      imageStatusFailed:'Failed',imageStatusCanceled:'Canceled',imageStatusComplete:'Complete',imageStatusActive:'Active',
+      imageBatchSucceeded:'succeeded',imageBatchFailed:'failed',imageBatchCanceled:'canceled',yes:'yes'
     });
     Object.assign(i18n.zh,{
       scheduleActionRetry:'\u91cd\u8bd5',scheduleActionRepairRetry:'\u4fee\u590d\u5e76\u91cd\u8bd5',
@@ -4696,21 +4719,27 @@ public static class WebPage
     }
 
     const CHAT_ATTACHMENT_MAX = 3;
-    const CHAT_ATTACHMENT_MAX_BYTES = 24 * 1024 * 1024;
+    const CHAT_ATTACHMENT_MAX_BYTES = 128 * 1024 * 1024;
+    const CHAT_ATTACHMENT_TOTAL_MAX_BYTES = 512 * 1024 * 1024;
     const CHAT_IMAGE_EXTENSIONS = ['.png','.jpg','.jpeg','.webp','.gif','.bmp'];
-    const CHAT_DOCUMENT_EXTENSIONS = ['.txt','.md','.markdown','.pdf','.doc','.docx','.rtf','.csv','.json','.xml','.yaml','.yml','.toml','.xls','.xlsx','.ppt','.pptx'];
-    const CHAT_ARCHIVE_EXTENSIONS = ['.zip'];
+    const CHAT_DOCUMENT_EXTENSIONS = ['.txt','.md','.markdown','.log','.ini','.html','.htm','.css','.js','.mjs','.cjs','.ts','.tsx','.jsx','.py','.ps1','.sh','.bat','.cmd','.sql','.pdf','.doc','.docx','.docm','.odt','.rtf','.csv','.tsv','.json','.xml','.yaml','.yml','.toml','.xls','.xlsx','.xlsm','.xlsb','.ods','.ppt','.pptx','.pptm','.odp','.pages','.numbers'];
+    const CHAT_ARCHIVE_EXTENSIONS = ['.zip','.rar','.7z','.tar','.gz','.tgz','.bz2','.xz'];
 
     function chatAttachmentExtension(name) {
       const match = String(name || '').toLowerCase().match(/\.[^.]+$/);
       return match ? match[0] : '';
     }
 
-    function chatAttachmentKind(name) {
+    function chatAttachmentKind(fileOrName) {
+      const name = typeof fileOrName === 'string' ? fileOrName : fileOrName?.name;
+      const mime = typeof fileOrName === 'string' ? '' : String(fileOrName?.type || '').toLowerCase();
       const ext = chatAttachmentExtension(name);
       if (CHAT_IMAGE_EXTENSIONS.includes(ext)) return 'image';
       if (CHAT_ARCHIVE_EXTENSIONS.includes(ext)) return 'archive';
       if (CHAT_DOCUMENT_EXTENSIONS.includes(ext)) return 'document';
+      if (mime.startsWith('image/')) return 'image';
+      if (/(zip|rar|7z|tar|gzip|bzip2|xz|compressed|archive)/i.test(mime)) return 'archive';
+      if (/^(text\/|application\/(pdf|json|xml|rtf|msword|vnd\.ms-|vnd\.openxmlformats-|vnd\.oasis\.opendocument|vnd\.apple\.pages|vnd\.apple\.numbers))/i.test(mime)) return 'document';
       return null;
     }
 
@@ -4725,18 +4754,23 @@ public static class WebPage
       const files = Array.from(fileList || []);
       if (!files.length) return;
       const next = state.chatAttachments || [];
+      let totalSize = next.reduce(function(total, item) { return total + (item.size || 0); }, 0);
       for (const file of files) {
         if (next.length >= CHAT_ATTACHMENT_MAX) {
           $('hint').textContent = t('fileLimit');
           break;
         }
-        const kind = chatAttachmentKind(file.name);
+        const kind = chatAttachmentKind(file);
         if (!kind) {
           $('hint').textContent = t('fileUnsupported') + ': ' + (file.name || '');
           continue;
         }
         if ((file.size || 0) > CHAT_ATTACHMENT_MAX_BYTES) {
           $('hint').textContent = t('fileTooLarge') + ': ' + (file.name || '');
+          continue;
+        }
+        if (totalSize + (file.size || 0) > CHAT_ATTACHMENT_TOTAL_MAX_BYTES) {
+          $('hint').textContent = t('fileTotalTooLarge') + ': ' + formatBytes(CHAT_ATTACHMENT_TOTAL_MAX_BYTES);
           continue;
         }
         const key = (file.name || '') + '|' + file.size + '|' + file.lastModified;
@@ -4753,6 +4787,7 @@ public static class WebPage
           kind,
           previewUrl: kind === 'image' ? URL.createObjectURL(file) : ''
         });
+        totalSize += file.size || 0;
       }
       state.chatAttachments = next.slice(0, CHAT_ATTACHMENT_MAX);
       renderAttachmentStrip();
@@ -4803,7 +4838,7 @@ public static class WebPage
         } else {
           const icon = document.createElement('span');
           icon.className = 'attachment-icon';
-          icon.textContent = item.kind === 'archive' ? 'ZIP' : 'DOC';
+          icon.textContent = item.kind === 'archive' ? 'ARC' : 'DOC';
           chip.appendChild(icon);
         }
         const copy = document.createElement('span');
@@ -4847,7 +4882,7 @@ public static class WebPage
         } else {
           const icon = document.createElement('span');
           icon.className = 'attachment-icon';
-          icon.textContent = kind === 'archive' ? 'ZIP' : 'DOC';
+          icon.textContent = kind === 'archive' ? 'ARC' : 'DOC';
           card.appendChild(icon);
         }
         const copy = document.createElement('span');
@@ -7210,7 +7245,12 @@ public static class WebPage
       if (target === 'settings') { await Promise.all([loadMultiModalConfig(), loadSecuritySettings()]); updateSettingsSection(); }
       else { stopRuntimeEventsSync(); }
       if (target === 'memory') await loadMemory();
-      if (target === 'chat') { await loadMultiModalConfig(); if (state.session) await loadSession(); startChatPolling(); updateChatJumpButton(); }
+      if (target === 'chat') {
+        await loadMultiModalConfig();
+        if (state.session && !state.busy) await loadSession();
+        startChatPolling();
+        updateChatJumpButton();
+      }
       else { stopChatPolling(); }
     }
 
@@ -8293,6 +8333,7 @@ public static class WebPage
       state.lastMessageCount = data.messages?.length ?? 0;
       renderMessages(data.messages);
       state.scheduledNoticeKeys = collectScheduledNoticeKeys(data.messages || []);
+      state.imageNoticeKeys = collectImageNoticeKeys(data.messages || []);
     }
     let chatPollTimer = null;
     function startChatPolling() {
@@ -8304,13 +8345,17 @@ public static class WebPage
           const currentCount = data.messages?.length ?? 0;
           if (currentCount !== state.lastMessageCount) {
             const noticeKeys = collectScheduledNoticeKeys(data.messages || []);
+            const imageNoticeKeys = collectImageNoticeKeys(data.messages || []);
             const hasNewNotice = Array.from(noticeKeys).some(key => !state.scheduledNoticeKeys.has(key));
+            const hasNewImageNotice = Array.from(imageNoticeKeys).some(key => !state.imageNoticeKeys.has(key));
             state.lastMessageCount = currentCount;
             updateStats(data.session);
             renderTask(data.activeTask);
             renderMessages(data.messages);
             state.scheduledNoticeKeys = noticeKeys;
+            state.imageNoticeKeys = imageNoticeKeys;
             if (hasNewNotice) playSoundCue('reply_done');
+            if (hasNewImageNotice) triggerHostNoticeContinuation();
           }
         } catch {}
       }, 5000);
@@ -9912,10 +9957,26 @@ public static class WebPage
       return runMatch ? runMatch[1] : simpleNoticeHash(content);
     }
 
+    function imageNoticeKey(msg) {
+      if (!msg || msg.role !== 'assistant' || msg.messageType !== 'image_generation_notice') return null;
+      const content = String(msg.content || '');
+      const jobMatch = content.match(/Job ID\S*\s*([^\s]+)/i);
+      return jobMatch ? jobMatch[1] : simpleNoticeHash(content);
+    }
+
     function collectScheduledNoticeKeys(messages) {
       const keys = new Set();
       (messages || []).forEach(function(msg) {
         const key = scheduledNoticeKey(msg);
+        if (key) keys.add(key);
+      });
+      return keys;
+    }
+
+    function collectImageNoticeKeys(messages) {
+      const keys = new Set();
+      (messages || []).forEach(function(msg) {
+        const key = imageNoticeKey(msg);
         if (key) keys.add(key);
       });
       return keys;
@@ -9946,6 +10007,10 @@ public static class WebPage
             if (msg.role === 'assistant') {
               if (msg.messageType === 'scheduled_task_notice') {
                 renderNoticeCard(msg.content, { target: fragment, scroll: false });
+                continue;
+              }
+              if (msg.messageType === 'image_generation_notice') {
+                renderImageNoticeCard(msg.content, { target: fragment, scroll: false });
                 continue;
               }
               if (msg.reasoningContent) {
@@ -10029,6 +10094,123 @@ public static class WebPage
       else label = t('noticeRunIdLabel');
       return label + ': ' + value;
     }
+    function parseImageNoticeContent(content) {
+      const data = { fields: {}, files: [], batchFiles: [] };
+      let section = '';
+      String(content || '').split('\n').map(line => line.trim()).filter(Boolean).forEach(function(line) {
+        if (line.startsWith('## ')) return;
+        if (line.startsWith('{show_file:')) return;
+        if (line === 'This notice is authoritative host state for this image job.') return;
+        if (line === 'Generated files:') { section = 'files'; return; }
+        if (line === 'Batch generated files:') { section = 'batchFiles'; return; }
+        if (line.startsWith('- ')) {
+          const text = line.slice(2).trim();
+          const path = text.replace(/\s*\(.*/, '').trim();
+          const promptMatch = text.match(/prompt:\s*([^)]+)/i);
+          const jobMatch = text.match(/job:\s*([^,)]+)/i);
+          const item = { path, prompt: promptMatch ? promptMatch[1].trim() : '', job: jobMatch ? jobMatch[1].trim() : '' };
+          if (section === 'batchFiles') data.batchFiles.push(item);
+          else data.files.push(item);
+          return;
+        }
+        const match = line.match(/^([^:]+):\s*(.*)$/);
+        if (match) data.fields[match[1].trim().toLowerCase()] = match[2].trim();
+      });
+      return data;
+    }
+    function localizeImageStatus(value) {
+      const key = String(value || '').trim().toLowerCase();
+      const map = { queued:'imageStatusQueued', running:'imageStatusRunning', succeeded:'imageStatusSucceeded', failed:'imageStatusFailed', canceled:'imageStatusCanceled', cancelled:'imageStatusCanceled', complete:'imageStatusComplete', active:'imageStatusActive' };
+      return map[key] ? t(map[key]) : value;
+    }
+    function localizeImageBatchStatus(value) {
+      const raw = String(value || '');
+      const match = raw.match(/^(complete|active)\s*\((\d+)\s+succeeded,\s*(\d+)\s+failed,\s*(\d+)\s+canceled\)/i);
+      if (!match) return raw;
+      return `${localizeImageStatus(match[1])} (${t('imageBatchSucceeded')}: ${match[2]}, ${t('imageBatchFailed')}: ${match[3]}, ${t('imageBatchCanceled')}: ${match[4]})`;
+    }
+    function imageNoticeField(labelKey, value) {
+      if (!value) return null;
+      const chip = document.createElement('span');
+      chip.className = 'schedule-rule-chip';
+      chip.style.cssText = 'font-size:11px;padding:3px 8px;border-color:rgba(100,219,255,.24);background:rgba(100,219,255,.08);color:#dff8ff;';
+      chip.textContent = t(labelKey) + ': ' + value;
+      return chip;
+    }
+    function renderImageNoticeCard(content, options = {}) {
+      const target = options.target || $('chat');
+      if (!target) return;
+      const parsed = parseImageNoticeContent(content);
+      const fields = parsed.fields;
+      const wrap = document.createElement('div');
+      wrap.className = 'message assistant';
+      const avatar = document.createElement('div');
+      avatar.className = 'avatar';
+      applyAvatar(avatar, 'assistant');
+      const stack = document.createElement('div');
+      stack.className = 'stack';
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      meta.textContent = t('imageNoticeMeta');
+      const card = document.createElement('div');
+      card.className = 'notice-card';
+      const badge = document.createElement('span');
+      badge.className = 'notice-badge';
+      badge.textContent = t('imageNoticeBadge');
+      const head = document.createElement('div');
+      head.className = 'notice-head';
+      head.appendChild(badge);
+      const tagsRow = document.createElement('div');
+      tagsRow.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;';
+      [
+        imageNoticeField('imageNoticeJobId', fields['job id']),
+        imageNoticeField('imageNoticeBatchId', fields['batch id']),
+        imageNoticeField('imageNoticeStatus', localizeImageStatus(fields.status)),
+        imageNoticeField('imageNoticeBatchStatus', localizeImageBatchStatus(fields['batch status'])),
+        imageNoticeField('imageNoticeFallback', fields['provider fallback'] ? t('yes') : ''),
+        imageNoticeField('imageNoticeProvider', fields['final provider/model'])
+      ].forEach(function(node) { if (node) tagsRow.appendChild(node); });
+      if (tagsRow.children.length) head.appendChild(tagsRow);
+      const titleEl = document.createElement('div');
+      titleEl.className = 'notice-title';
+      titleEl.textContent = t('imageNoticeTitle');
+      const bodyEl = document.createElement('div');
+      bodyEl.className = 'notice-body markdown';
+      const lines = [];
+      if (fields.prompt) lines.push(`**${t('imageNoticePrompt')}**: ${fields.prompt}`);
+      if (fields['requested profile']) lines.push(`**${t('imageNoticeRequestedProfile')}**: ${fields['requested profile']}`);
+      if (fields.error) lines.push(`**${t('imageNoticeError')}**: ${fields.error}`);
+      if (fields['error category']) lines.push(`**${t('imageNoticeErrorCategory')}**: ${fields['error category']}`);
+      const files = parsed.batchFiles.length ? parsed.batchFiles : parsed.files;
+      if (files.length) {
+        lines.push('');
+        lines.push(`**${parsed.batchFiles.length ? t('imageNoticeBatchFiles') : t('imageNoticeFiles')}**`);
+        files.forEach(function(file) {
+          const parts = [file.path];
+          if (file.job) parts.push(`${t('imageNoticeJobId')}: ${file.job}`);
+          if (file.prompt) parts.push(`${t('imageNoticePrompt')}: ${file.prompt}`);
+          lines.push('- ' + parts.join(' | '));
+        });
+      }
+      lines.push('');
+      lines.push(t('imageNoticeAuthority'));
+      setMarkdownContent(bodyEl, lines.join('\n'));
+      if (isPreviewFileContent(content)) {
+        const previewContainer = renderPreviewFiles(content);
+        if (previewContainer) {
+          previewContainer.style.marginTop = '12px';
+          bodyEl.appendChild(previewContainer);
+        }
+      }
+      const time = document.createElement('div');
+      time.className = 'notice-time';
+      time.textContent = new Date().toLocaleString(state.lang === 'zh' ? 'zh-CN' : 'en-US');
+      card.append(head, titleEl, bodyEl, time);
+      stack.append(meta, card);
+      wrap.append(avatar, stack);
+      target.appendChild(wrap);
+      if (options.scroll !== false) scrollBottom();
+    }
     function renderNoticeCard(content, options = {}) {
       const target = options.target || $('chat');
       if (!target) return;
@@ -10090,11 +10272,24 @@ public static class WebPage
       if (options.scroll !== false) scrollBottom();
     }
 
-    async function sendMessage(text) {
+    async function triggerHostNoticeContinuation() {
+      if (state.hostNoticeContinuationRunning || state.busy || !state.agent || !state.session) return;
+      state.hostNoticeContinuationRunning = true;
+      try {
+        await sendMessage('', { continueFromHostNotice: true });
+      } finally {
+        state.hostNoticeContinuationRunning = false;
+      }
+    }
+
+    async function sendMessage(text, options = {}) {
+      const continueFromHostNotice = options.continueFromHostNotice === true;
       state.chatFollowStream = isChatNearBottom($('chat'), 110);
-      const outgoingAttachments = (state.chatAttachments || []).slice();
+      const outgoingAttachments = continueFromHostNotice ? [] : (state.chatAttachments || []).slice();
       const visibleText = text || (outgoingAttachments.length ? t('fileAttachment') : '');
-      addMessage('user', visibleText, t('you'), { attachments: outgoingAttachments });
+      if (!continueFromHostNotice) {
+        addMessage('user', visibleText, t('you'), { attachments: outgoingAttachments });
+      }
       const ai = addAssistantStreaming();
       const controller = new AbortController();
       state.abortController = controller;
@@ -10172,7 +10367,7 @@ public static class WebPage
         requestBody = form;
       } else {
         requestHeaders = { 'content-type': 'application/json' };
-        requestBody = JSON.stringify({ agent: state.agent, session: state.session, message: text });
+        requestBody = JSON.stringify({ agent: state.agent, session: state.session, message: text, continueFromHostNotice });
       }
 
       const res = await fetch('/api/chat', {
@@ -10264,6 +10459,7 @@ public static class WebPage
         await waitForSoundCueQueueIdle();
       }
       await maybeAutoPlayPreparedSpeech(speechTask);
+      await loadSession();
       await loadSessions({ reloadCurrentSession: false });
       } catch (err) {
         orderedUi.enqueue(async function() {
@@ -10840,6 +11036,20 @@ public static class WebPage
     $('chatAttachmentInput')?.addEventListener('change', function(event) {
       addChatAttachmentFiles(event.target.files || []);
       event.target.value = '';
+    });
+    $('composer')?.addEventListener('dragover', function(event) {
+      if (!event.dataTransfer?.files?.length) return;
+      event.preventDefault();
+    });
+    $('composer')?.addEventListener('drop', function(event) {
+      if (!event.dataTransfer?.files?.length) return;
+      event.preventDefault();
+      addChatAttachmentFiles(event.dataTransfer.files);
+    });
+    $('input')?.addEventListener('paste', function(event) {
+      const files = event.clipboardData?.files;
+      if (!files?.length) return;
+      addChatAttachmentFiles(files);
     });
 
     $('input').addEventListener('input', () => {

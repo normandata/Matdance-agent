@@ -34,7 +34,7 @@ public partial class ToolExecutor
         return JsonSerializer.Serialize(payload, new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true });
     }
 
-    private async Task<string> ExecuteScheduledTaskDoAsync(Dictionary<string, JsonElement> args)
+    private async Task<string> ExecuteScheduledTaskDoAsync(Dictionary<string, JsonElement> args, CancellationToken ct)
     {
         var service = new ScheduledTaskService(_path);
         var taskId = RequiredString(args, "task_id");
@@ -49,19 +49,19 @@ public partial class ToolExecutor
             var resource = BackgroundWorkCoordinator.GetScheduledTaskResourceKey(taskInfo);
             if (resource != null)
             {
-                resourceLease = await _backgroundWork.TryAcquireResourceAsync(_agentName, resource, BackgroundWorkCoordinator.ResourceRetryTimeout, CancellationToken.None);
+                resourceLease = await _backgroundWork.TryAcquireResourceAsync(_agentName, resource, BackgroundWorkCoordinator.ResourceRetryTimeout, ct);
                 if (resourceLease == null)
                     return $"[busy] Scheduled task {taskId} is waiting for the {resource} resource lock. Try again later.";
             }
 
-            budgetLease = await _backgroundWork.TryAcquireBudgetAsync(_agentName, TimeSpan.Zero, CancellationToken.None);
+            budgetLease = await _backgroundWork.TryAcquireBudgetAsync(_agentName, TimeSpan.Zero, ct);
             if (budgetLease == null)
             {
                 resourceLease?.Dispose();
                 return $"[busy] Scheduled task {taskId} needs one extra background budget slot. Increase max_concurrency or retry after the current work finishes.";
             }
 
-            budgetCts = _backgroundWork.CreateBudgetCancellation(_agentName, CancellationToken.None);
+            budgetCts = _backgroundWork.CreateBudgetCancellation(_agentName, ct);
             linked = _backgroundWork.CreateAgentLinkedCancellation(_agentName, budgetCts.Token);
         }
 
@@ -81,7 +81,7 @@ public partial class ToolExecutor
         var runner = new ScheduledTaskRunner(_path, service, memoryOrg, skillMaintenance, backgroundWork: _backgroundWork);
         try
         {
-            var run = await runner.ExecuteAsync(task, "manual", DateTimeOffset.UtcNow, deliver, linked?.Token ?? CancellationToken.None);
+            var run = await runner.ExecuteAsync(task, "manual", DateTimeOffset.UtcNow, deliver, linked?.Token ?? ct);
             service.FinishRun(run);
             var delivery = deliver ? string.Join(", ", run.DeliveryResults.Select(item => item.SessionId + ":" + item.Status)) : "suppressed for test";
             return $"[scheduled_task_do] Run {run.RunId} {run.Status}. Delivery: {delivery}.\n{run.Output ?? run.Error}";

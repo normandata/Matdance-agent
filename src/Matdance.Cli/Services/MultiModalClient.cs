@@ -9,7 +9,7 @@ namespace Matdance.Cli.Services;
 
 public sealed class MultiModalClient
 {
-    private static readonly HttpClient Http = new();
+    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(3) };
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly Regex UrlRegex = new(@"https?://[^\s)'""<>]+", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private readonly PathService _path;
@@ -23,6 +23,17 @@ public sealed class MultiModalClient
 
     public async Task<IReadOnlyList<GeneratedFileResult>> GenerateImageAsync(string agent, ImageGenerationRequest request, CancellationToken ct = default)
     {
+        var outcome = await GenerateImageDetailedAsync(agent, request, ct);
+        if (!outcome.Success)
+        {
+            throw new InvalidOperationException(outcome.Error ?? "image_generation failed.");
+        }
+
+        return outcome.Results;
+    }
+
+    public async Task<ImageGenerationOutcome> GenerateImageDetailedAsync(string agent, ImageGenerationRequest request, CancellationToken ct = default)
+    {
         var effective = _config.GetEffective(agent);
         if (string.IsNullOrWhiteSpace(request.Prompt)) throw new InvalidOperationException("prompt is required.");
 
@@ -35,20 +46,67 @@ public sealed class MultiModalClient
         }
 
         Exception? lastError = null;
-        foreach (var image in candidates)
+        var attempts = new List<ImageGenerationAttempt>();
+        for (var index = 0; index < candidates.Count; index++)
         {
+            var image = candidates[index];
+            var attempt = new ImageGenerationAttempt
+            {
+                Order = index + 1,
+                ProfileId = image.Id,
+                ProfileName = image.Name,
+                Model = image.Model,
+                Status = "running",
+                StartedAt = UserTimeZoneService.Now()
+            };
+            attempts.Add(attempt);
             try
             {
                 RequireEndpoint(image.BaseUrl, image.ApiKey, $"image_generation profile '{image.Name}'");
-                return await GenerateImageWithProfileAsync(agent, image, request, ct);
+                var results = (await GenerateImageWithProfileAsync(agent, image, request, ct)).ToList();
+                var fallbackOccurred = attempts.Any(item => string.Equals(item.Status, "failed", StringComparison.OrdinalIgnoreCase));
+                foreach (var result in results)
+                {
+                    result.FallbackOccurred = fallbackOccurred;
+                }
+
+                attempt.Status = "succeeded";
+                attempt.FinishedAt = UserTimeZoneService.Now();
+                return new ImageGenerationOutcome
+                {
+                    Success = true,
+                    FallbackOccurred = fallbackOccurred,
+                    Attempts = attempts,
+                    Results = results
+                };
             }
-            catch (Exception ex) when (candidates.Count > 1)
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                attempt.Status = "canceled";
+                attempt.Error = "image_generation was canceled.";
+                attempt.ErrorType = nameof(OperationCanceledException);
+                attempt.FinishedAt = UserTimeZoneService.Now();
+                throw;
+            }
+            catch (Exception ex)
             {
                 lastError = ex;
+                attempt.Status = "failed";
+                attempt.Error = ex.Message;
+                attempt.ErrorType = ex.GetType().Name;
+                attempt.FinishedAt = UserTimeZoneService.Now();
             }
         }
 
-        throw lastError ?? new InvalidOperationException("image_generation failed before selecting a profile.");
+        return new ImageGenerationOutcome
+        {
+            Success = false,
+            Error = lastError?.Message ?? "image_generation failed before selecting a profile.",
+            ErrorType = lastError?.GetType().Name,
+            ErrorCategory = ClassifyImageGenerationError(lastError),
+            FallbackOccurred = attempts.Count > 1 && attempts.Any(item => string.Equals(item.Status, "failed", StringComparison.OrdinalIgnoreCase)),
+            Attempts = attempts
+        };
     }
 
     private async Task<IReadOnlyList<GeneratedFileResult>> GenerateImageWithProfileAsync(string agent, EffectiveImageGenerationConfig image, ImageGenerationRequest request, CancellationToken ct)
@@ -127,7 +185,7 @@ public sealed class MultiModalClient
             }
             else if (item.TryGetProperty("url", out var url) && url.ValueKind == JsonValueKind.String)
             {
-                bytes = await Http.GetByteArrayAsync(url.GetString(), ct);
+                bytes = await GetByteArrayWithReconnectAsync(url.GetString() ?? "", ct);
             }
             else
             {
@@ -137,7 +195,7 @@ public sealed class MultiModalClient
             var filePath = ResolveGeneratedPath(agent, request.OutputPath, request.UseBrowserTemp, "images", "image", outputFormat, index, count);
             Directory.CreateDirectory(Path.GetDirectoryName(filePath)!);
             await File.WriteAllBytesAsync(filePath, bytes, ct);
-            results.Add(Result(agent, filePath, "image", outputFormat, image));
+            results.Add(Result(agent, filePath, "image", outputFormat, image: image, imageRequest: request));
         }
 
         if (results.Count == 0)
@@ -300,14 +358,17 @@ public sealed class MultiModalClient
     {
         var endpoint = Endpoint(search.BaseUrl, SearchEndpoint(search));
         var separator = endpoint.Contains('?', StringComparison.Ordinal) ? "&" : "?";
-        using var httpRequest = new HttpRequestMessage(HttpMethod.Get, $"{endpoint}{separator}q={Uri.EscapeDataString(query)}&count={maxResults}");
-        httpRequest.Headers.TryAddWithoutValidation("X-Subscription-Token", search.ApiKey);
-        httpRequest.Headers.TryAddWithoutValidation("Accept", "application/json");
-        using var response = await Http.SendAsync(httpRequest, ct);
-        var body = await response.Content.ReadAsStringAsync(ct);
-        if (!response.IsSuccessStatusCode)
+        var braveResponse = await SendStringRequestWithReconnectAsync(() =>
         {
-            throw new HttpRequestException($"web_search brave failed: {(int)response.StatusCode} - {Trim(body, 2000)}");
+            var httpRequest = new HttpRequestMessage(HttpMethod.Get, $"{endpoint}{separator}q={Uri.EscapeDataString(query)}&count={maxResults}");
+            httpRequest.Headers.TryAddWithoutValidation("X-Subscription-Token", search.ApiKey);
+            httpRequest.Headers.TryAddWithoutValidation("Accept", "application/json");
+            return httpRequest;
+        }, ct);
+        var body = braveResponse.Body;
+        if (!braveResponse.Success)
+        {
+            throw new HttpRequestException($"web_search brave failed: {braveResponse.StatusCode} - {Trim(body, 2000)}");
         }
 
         using var document = JsonDocument.Parse(body);
@@ -396,14 +457,17 @@ public sealed class MultiModalClient
             ["response_format"] = format
         };
 
-        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, Endpoint(tts.BaseUrl, TtsEndpoint(tts)));
-        httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", tts.ApiKey);
-        httpRequest.Content = JsonContent(payload);
-        using var response = await Http.SendAsync(httpRequest, ct);
-        var bytes = await response.Content.ReadAsByteArrayAsync(ct);
-        if (!response.IsSuccessStatusCode)
+        var ttsResponse = await SendBytesRequestWithReconnectAsync(() =>
         {
-            throw new HttpRequestException($"text_to_speech failed: {(int)response.StatusCode} - {Trim(Encoding.UTF8.GetString(bytes), 2000)}");
+            var httpRequest = new HttpRequestMessage(HttpMethod.Post, Endpoint(tts.BaseUrl, TtsEndpoint(tts)));
+            httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", tts.ApiKey);
+            httpRequest.Content = JsonContent(payload);
+            return httpRequest;
+        }, ct);
+        var bytes = ttsResponse.Body;
+        if (!ttsResponse.Success)
+        {
+            throw new HttpRequestException($"text_to_speech failed: {ttsResponse.StatusCode} - {Trim(Encoding.UTF8.GetString(bytes), 2000)}");
         }
 
         var filePath = ResolveGeneratedPath(agent, request.OutputPath, request.UseBrowserTemp, "audio", "speech", format, 1, 1);
@@ -490,23 +554,29 @@ public sealed class MultiModalClient
             return await TranscribeViaChatCompletionsAsync(stt, audio, fileName, contentType, ct);
         }
 
-        using var request = new HttpRequestMessage(HttpMethod.Post, Endpoint(stt.BaseUrl, "audio/transcriptions"));
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", stt.ApiKey);
-        using var form = new MultipartFormDataContent();
-        form.Add(new StringContent(stt.Model), "model");
-        var fileContent = new StreamContent(audio);
-        if (!string.IsNullOrWhiteSpace(contentType))
+        using var audioBuffer = new MemoryStream();
+        await audio.CopyToAsync(audioBuffer, ct);
+        var audioBytes = audioBuffer.ToArray();
+        var response = await SendStringRequestWithReconnectAsync(() =>
         {
-            fileContent.Headers.ContentType = MediaTypeHeaderValue.Parse(contentType);
-        }
+            var request = new HttpRequestMessage(HttpMethod.Post, Endpoint(stt.BaseUrl, "audio/transcriptions"));
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", stt.ApiKey);
+            var form = new MultipartFormDataContent();
+            form.Add(new StringContent(stt.Model), "model");
+            var fileContent = new ByteArrayContent(audioBytes);
+            if (!string.IsNullOrWhiteSpace(contentType))
+            {
+                fileContent.Headers.ContentType = MediaTypeHeaderValue.Parse(contentType);
+            }
 
-        form.Add(fileContent, "file", string.IsNullOrWhiteSpace(fileName) ? "audio.webm" : fileName);
-        request.Content = form;
-        using var response = await Http.SendAsync(request, ct);
-        var body = await response.Content.ReadAsStringAsync(ct);
-        if (!response.IsSuccessStatusCode)
+            form.Add(fileContent, "file", string.IsNullOrWhiteSpace(fileName) ? "audio.webm" : fileName);
+            request.Content = form;
+            return request;
+        }, ct);
+        var body = response.Body;
+        if (!response.Success)
         {
-            throw new HttpRequestException($"speech_to_text failed: {(int)response.StatusCode} - {Trim(body, 2000)}");
+            throw new HttpRequestException($"speech_to_text failed: {response.StatusCode} - {Trim(body, 2000)}");
         }
 
         using var document = JsonDocument.Parse(body);
@@ -585,7 +655,7 @@ public sealed class MultiModalClient
             throw new InvalidOperationException("text_to_speech chat_completions returned no usable audio payload. If this relay only supports plain chat text, use v1/tts or v1/audio/speech instead.");
         }
 
-        var bytes = audioPayload.Bytes ?? await Http.GetByteArrayAsync(audioPayload.Url, ct);
+        var bytes = audioPayload.Bytes ?? await GetByteArrayWithReconnectAsync(audioPayload.Url!, ct);
         var fileFormat = FirstValue(audioPayload.Format, GuessAudioFormat(audioPayload.Url), format);
         var filePath = ResolveGeneratedPath(agent, request.OutputPath, request.UseBrowserTemp, "audio", "speech", fileFormat, 1, 1);
         Directory.CreateDirectory(Path.GetDirectoryName(filePath)!);
@@ -635,7 +705,7 @@ public sealed class MultiModalClient
             throw new InvalidOperationException("text_to_speech aliyun_qwen_tts returned no usable output.audio.url or audio payload.");
         }
 
-        var bytes = audioPayload.Bytes ?? await Http.GetByteArrayAsync(audioPayload.Url!, ct);
+        var bytes = audioPayload.Bytes ?? await GetByteArrayWithReconnectAsync(audioPayload.Url!, ct);
         var fileFormat = FirstValue(audioPayload.Format, GuessAudioFormat(audioPayload.Url), "wav");
         var filePath = ResolveGeneratedPath(agent, request.OutputPath, request.UseBrowserTemp, "audio", "speech", fileFormat, 1, 1);
         Directory.CreateDirectory(Path.GetDirectoryName(filePath)!);
@@ -681,14 +751,17 @@ public sealed class MultiModalClient
             }
         };
 
-        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, Endpoint(stt.BaseUrl, "chat/completions"));
-        httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", stt.ApiKey);
-        httpRequest.Content = JsonContent(payload);
-        using var response = await Http.SendAsync(httpRequest, ct);
-        var body = await response.Content.ReadAsStringAsync(ct);
-        if (!response.IsSuccessStatusCode)
+        var sttResponse = await SendStringRequestWithReconnectAsync(() =>
         {
-            throw new HttpRequestException($"speech_to_text chat_completions failed: {(int)response.StatusCode} - {Trim(body, 2000)}");
+            var httpRequest = new HttpRequestMessage(HttpMethod.Post, Endpoint(stt.BaseUrl, "chat/completions"));
+            httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", stt.ApiKey);
+            httpRequest.Content = JsonContent(payload);
+            return httpRequest;
+        }, ct);
+        var body = sttResponse.Body;
+        if (!sttResponse.Success)
+        {
+            throw new HttpRequestException($"speech_to_text chat_completions failed: {sttResponse.StatusCode} - {Trim(body, 2000)}");
         }
 
         using var document = JsonDocument.Parse(body);
@@ -712,17 +785,18 @@ public sealed class MultiModalClient
         bool useModelScopeAsync,
         CancellationToken ct)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Post, endpoint);
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
-        if (useModelScopeAsync)
+        return await SendStringRequestWithReconnectAsync(() =>
         {
-            request.Headers.TryAddWithoutValidation("X-ModelScope-Async-Mode", "true");
-        }
+            var request = new HttpRequestMessage(HttpMethod.Post, endpoint);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+            if (useModelScopeAsync)
+            {
+                request.Headers.TryAddWithoutValidation("X-ModelScope-Async-Mode", "true");
+            }
 
-        request.Content = JsonContent(payload);
-        using var response = await Http.SendAsync(request, ct);
-        var body = await response.Content.ReadAsStringAsync(ct);
-        return (response.IsSuccessStatusCode, (int)response.StatusCode, body);
+            request.Content = JsonContent(payload);
+            return request;
+        }, ct);
     }
 
     private static async Task<(bool Success, int StatusCode, string Body)> SendJsonRequestAsync(
@@ -731,32 +805,35 @@ public sealed class MultiModalClient
         object payload,
         CancellationToken ct)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Post, endpoint);
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
-        request.Content = JsonContent(payload);
-        using var response = await Http.SendAsync(request, ct);
-        var body = await response.Content.ReadAsStringAsync(ct);
-        return (response.IsSuccessStatusCode, (int)response.StatusCode, body);
+        return await SendStringRequestWithReconnectAsync(() =>
+        {
+            var request = new HttpRequestMessage(HttpMethod.Post, endpoint);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+            request.Content = JsonContent(payload);
+            return request;
+        }, ct);
     }
 
     private static async Task<IReadOnlyList<string>> PollModelScopeImageTaskAsync(string baseUrl, string apiKey, string taskId, CancellationToken ct)
     {
         var taskEndpoint = Endpoint(baseUrl, "tasks/" + Uri.EscapeDataString(taskId));
-        const int maxAttempts = 120;
+        const int maxAttempts = 300;
         var delay = TimeSpan.FromSeconds(5);
 
         for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
             ct.ThrowIfCancellationRequested();
-            using var request = new HttpRequestMessage(HttpMethod.Get, taskEndpoint);
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
-            request.Headers.TryAddWithoutValidation("X-ModelScope-Task-Type", "image_generation");
-
-            using var response = await Http.SendAsync(request, ct);
-            var body = await response.Content.ReadAsStringAsync(ct);
-            if (!response.IsSuccessStatusCode)
+            var pollResponse = await SendStringRequestWithReconnectAsync(() =>
             {
-                throw new HttpRequestException($"image_generation async task poll failed: {(int)response.StatusCode} - {Trim(body, 2000)}");
+                var request = new HttpRequestMessage(HttpMethod.Get, taskEndpoint);
+                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+                request.Headers.TryAddWithoutValidation("X-ModelScope-Task-Type", "image_generation");
+                return request;
+            }, ct);
+            var body = pollResponse.Body;
+            if (!pollResponse.Success)
+            {
+                throw new HttpRequestException($"image_generation async task poll failed: {pollResponse.StatusCode} - {Trim(body, 2000)}");
             }
 
             using var document = JsonDocument.Parse(body);
@@ -794,8 +871,115 @@ public sealed class MultiModalClient
         throw new TimeoutException("image_generation async task timed out waiting for ModelScope result.");
     }
 
+    public static string ClassifyImageGenerationError(Exception? ex)
+    {
+        if (ex == null) return "unknown";
+        var text = (ex.Message ?? string.Empty).ToLowerInvariant();
+        if (ex is OperationCanceledException) return "canceled";
+        if (ex is TimeoutException || text.Contains("timeout") || text.Contains("timed out")) return "timeout";
+        if (text.Contains("401") || text.Contains("403") || text.Contains("unauthor") || text.Contains("forbidden") || text.Contains("api key") || text.Contains("apikey") || text.Contains("auth")) return "auth";
+        if (text.Contains("quota") || text.Contains("credit") || text.Contains("balance") || text.Contains("billing") || text.Contains("insufficient") || text.Contains("429")) return "quota";
+        if (text.Contains("model") && (text.Contains("not found") || text.Contains("unavailable") || text.Contains("disabled"))) return "model_unavailable";
+        if (text.Contains("safety") || text.Contains("policy") || text.Contains("moderation") || text.Contains("unsafe") || text.Contains("content")) return "content_policy";
+        if (ex is HttpRequestException || text.Contains("dns") || text.Contains("connection") || text.Contains("network") || text.Contains("temporarily")) return "network";
+        return "unknown";
+    }
+
     private static StringContent JsonContent(object payload) =>
         new(JsonSerializer.Serialize(payload, JsonOptions), Encoding.UTF8, "application/json");
+
+    private static async Task<(bool Success, int StatusCode, string Body)> SendStringRequestWithReconnectAsync(
+        Func<HttpRequestMessage> requestFactory,
+        CancellationToken ct)
+    {
+        var maxAttempts = ReconnectRetryPolicy.TotalAttempts;
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                using var request = requestFactory();
+                using var response = await Http.SendAsync(request, ct);
+                var body = await response.Content.ReadAsStringAsync(ct);
+                var statusCode = (int)response.StatusCode;
+                if (!response.IsSuccessStatusCode && IsReconnectRetryableStatus(statusCode) && attempt < maxAttempts)
+                {
+                    await DelayReconnectRetryAsync(attempt, ct);
+                    continue;
+                }
+
+                return (response.IsSuccessStatusCode, statusCode, body);
+            }
+            catch (Exception ex) when (IsReconnectRetryableException(ex) && attempt < maxAttempts && !ct.IsCancellationRequested)
+            {
+                await DelayReconnectRetryAsync(attempt, ct);
+            }
+        }
+
+        throw new TimeoutException("HTTP request reconnect retry budget was exhausted.");
+    }
+
+    private static async Task<(bool Success, int StatusCode, byte[] Body)> SendBytesRequestWithReconnectAsync(
+        Func<HttpRequestMessage> requestFactory,
+        CancellationToken ct)
+    {
+        var maxAttempts = ReconnectRetryPolicy.TotalAttempts;
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                using var request = requestFactory();
+                using var response = await Http.SendAsync(request, ct);
+                var body = await response.Content.ReadAsByteArrayAsync(ct);
+                var statusCode = (int)response.StatusCode;
+                if (!response.IsSuccessStatusCode && IsReconnectRetryableStatus(statusCode) && attempt < maxAttempts)
+                {
+                    await DelayReconnectRetryAsync(attempt, ct);
+                    continue;
+                }
+
+                return (response.IsSuccessStatusCode, statusCode, body);
+            }
+            catch (Exception ex) when (IsReconnectRetryableException(ex) && attempt < maxAttempts && !ct.IsCancellationRequested)
+            {
+                await DelayReconnectRetryAsync(attempt, ct);
+            }
+        }
+
+        throw new TimeoutException("HTTP bytes request reconnect retry budget was exhausted.");
+    }
+
+    private static async Task<byte[]> GetByteArrayWithReconnectAsync(string url, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(url))
+            throw new InvalidOperationException("Cannot download an empty URL.");
+
+        var response = await SendBytesRequestWithReconnectAsync(() => new HttpRequestMessage(HttpMethod.Get, url), ct);
+        if (!response.Success)
+            throw new HttpRequestException($"download failed: {response.StatusCode} - {Trim(Encoding.UTF8.GetString(response.Body), 1200)}");
+
+        return response.Body;
+    }
+
+    private static async Task DelayReconnectRetryAsync(int failedAttempt, CancellationToken ct)
+    {
+        var step = ReconnectRetryPolicy.GetStepAfterFailure(failedAttempt) ?? throw new TimeoutException("Reconnect retry budget was exhausted.");
+        await Task.Delay(step.Delay, ct);
+    }
+
+    private static bool IsReconnectRetryableStatus(int status)
+    {
+        return status == 408 || status == 409 || status == 429 || status >= 500;
+    }
+
+    private static bool IsReconnectRetryableException(Exception ex)
+    {
+        return ex is HttpRequestException
+            || ex is IOException
+            || ex is TaskCanceledException
+            || ex is TimeoutException;
+    }
 
     private static void RequireEndpoint(string baseUrl, string apiKey, string name)
     {
@@ -1079,12 +1263,12 @@ public sealed class MultiModalClient
         foreach (var payload in payloads)
         {
             index++;
-            var bytes = payload.Bytes ?? await Http.GetByteArrayAsync(payload.Url!, ct);
+            var bytes = payload.Bytes ?? await GetByteArrayWithReconnectAsync(payload.Url!, ct);
             var fileFormat = FirstValue(payload.Format, GuessImageFormat(payload.Url), fallbackFormat);
             var filePath = ResolveGeneratedPath(agent, request.OutputPath, request.UseBrowserTemp, "images", "image", fileFormat, index, count);
             Directory.CreateDirectory(Path.GetDirectoryName(filePath)!);
             await File.WriteAllBytesAsync(filePath, bytes, ct);
-            results.Add(Result(agent, filePath, "image", fileFormat, image));
+            results.Add(Result(agent, filePath, "image", fileFormat, image: image, imageRequest: request));
         }
 
         if (results.Count == 0)
@@ -1657,7 +1841,7 @@ public sealed class MultiModalClient
         return candidate;
     }
 
-    private GeneratedFileResult Result(string agent, string filePath, string type, string format, EffectiveImageGenerationConfig? image = null, EffectiveTextToSpeechConfig? tts = null)
+    private GeneratedFileResult Result(string agent, string filePath, string type, string format, EffectiveImageGenerationConfig? image = null, EffectiveTextToSpeechConfig? tts = null, ImageGenerationRequest? imageRequest = null)
     {
         var relative = PreviewPath(agent, filePath);
         return new GeneratedFileResult
@@ -1668,6 +1852,10 @@ public sealed class MultiModalClient
             Type = type,
             Format = format,
             Size = new FileInfo(filePath).Length,
+            JobId = imageRequest?.JobId,
+            BatchId = imageRequest?.BatchId,
+            Prompt = imageRequest?.Prompt,
+            RequestedImageProfile = imageRequest?.ImageProfile,
             ImageProfileId = image?.Id,
             ImageProfileName = image?.Name,
             TtsProfileId = tts?.Id,

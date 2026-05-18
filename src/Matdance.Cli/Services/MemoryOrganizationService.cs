@@ -925,6 +925,10 @@ public class MemoryOrganizationService
 - For incremental updates, merge the current memory text with new evidence and return the complete post-merge file content. For full rebuild, return the complete rebuilt file content. If there is no useful change for a file, return the existing file content exactly, not a placeholder.
 - Memory may record wishlists, guesses, promises, future plans, ordinary summaries, and unverified items, but the type must be explicit. Label them as plan, guess, promise, pending verification, summary, preference, decision, result, or confirmed fact. Never rewrite them as already happened or verified facts.
 - Do not invent facts, fill gaps from model intuition, or turn uncertain content into certain memory. If evidence is weak, preserve uncertainty or skip it.
+- Conflict cleanup is mandatory. When several entries describe the same event, bug, decision, preference, or failed attempt, keep one latest accurate version and remove stale duplicates. If the latest evidence supersedes an older belief, state the replacement once and do not preserve both as equally current.
+- Reduce pollution from failure loops. Do not preserve repeated apology/promise/failure cycles, emotional self-judgment, unfulfilled "next time I will" claims, or long logs of failed attempts unless they contain a durable lesson, a concrete unresolved blocker, or a reproducible diagnostic result.
+- Failed attempts belong in memory only when actionable: summarize the root cause, the exact invalid approach to avoid, or the remaining blocker. Drop blow-by-blow trial logs, vague remorse, and no-conclusion retries.
+- Prefer stable outcomes over process noise: decisions, confirmed constraints, working commands, verified fixes, current blockers, and user preferences outrank ordinary conversation summaries and agent self-commentary.
 - Minimize privacy data. User-provided private facts may be remembered semantically when useful, but raw secret values such as passwords, tokens, API keys, cookie values, authorization files, and credential database contents must not be stored.
 - Keep memory layer ownership strict:
   - user_md stores only the user's durable profile and preferences: names, personality, likes/dislikes, habits, communication preferences, stable traits, and long-term constraints.
@@ -1166,9 +1170,9 @@ public class MemoryOrganizationService
                     beforeRetryDelay: async (attempt, delay, error, token) =>
                     {
                         var errorMsg = error?.Message ?? "unknown error";
-                        job.Stage = $"Memory organization subagent retrying ({attempt}): {errorMsg}";
+                        job.Stage = $"Memory organization subagent retrying ({attempt}); next probe in {delay.TotalSeconds:F0}s: {errorMsg}";
                         job.Error = errorMsg;
-                        await Task.Delay(delay, token);
+                        await Task.CompletedTask;
                     },
                     enableThinking: false);
             }
@@ -1567,6 +1571,7 @@ public class SessionContext
     public string SessionId { get; set; } = string.Empty;
     public DateTimeOffset LastActivity { get; set; }
     public int TotalMessages { get; set; }
+    public int StartIndex { get; set; }
     public List<ChatMessage> Messages { get; set; } = new();
     public SessionBookmark? Bookmark { get; set; }
 }

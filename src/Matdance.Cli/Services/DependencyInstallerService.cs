@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -6,18 +7,27 @@ namespace Matdance.Cli.Services;
 
 public sealed class DependencyInstallerService
 {
+    private static readonly object BrowserDependencyCacheLock = new();
+    private static DateTimeOffset _browserDependencyCacheAt;
+    private static string _browserDependencyCacheKey = string.Empty;
+    private static bool _browserDependencyCacheValue;
+
     public async Task InstallAsync(DependencySource source, Action<string>? log = null, CancellationToken ct = default)
     {
         MatdanceRuntime.ConfigureProcessEnvironment();
         Directory.CreateDirectory(MatdanceRuntime.DependenciesRoot);
         Directory.CreateDirectory(MatdanceRuntime.PlaywrightBrowsersPath);
+        var effectiveSource = ResolveSource(source);
 
         log?.Invoke($"Dependency root: {MatdanceRuntime.DependenciesRoot}");
         log?.Invoke($"Playwright browsers: {MatdanceRuntime.PlaywrightBrowsersPath}");
-        log?.Invoke($"Download source: {(source == DependencySource.Cn ? "CN optimized" : "Global")}");
+        log?.Invoke($"Download source: {DescribeSource(source, effectiveSource)}");
 
-        await InstallPlaywrightChromiumAsync(source, log, ct);
+        await InstallPlaywrightChromiumAsync(effectiveSource, log, ct);
     }
+
+    public static DependencySource ResolveSource(DependencySource source)
+        => source == DependencySource.Auto ? InferDefaultSource() : source;
 
     public bool HasPlaywrightChromium()
     {
@@ -26,13 +36,31 @@ public sealed class DependencyInstallerService
             Environment.GetEnvironmentVariable("PLAYWRIGHT_BROWSERS_PATH"),
             MatdanceRuntime.PlaywrightBrowsersPath,
             Path.Combine(MatdanceRuntime.DependenciesRoot, "playwright-browsers")
-        };
+        }
+        .Where(path => !string.IsNullOrWhiteSpace(path))
+        .Select(path => Path.GetFullPath(path!))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToArray();
 
-        return candidates
-            .Where(path => !string.IsNullOrWhiteSpace(path))
-            .Select(path => Path.GetFullPath(path!))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Any(HasPlaywrightChromiumAt);
+        var cacheKey = string.Join("|", candidates);
+        lock (BrowserDependencyCacheLock)
+        {
+            if (cacheKey.Equals(_browserDependencyCacheKey, StringComparison.Ordinal)
+                && DateTimeOffset.UtcNow - _browserDependencyCacheAt < TimeSpan.FromSeconds(5))
+            {
+                return _browserDependencyCacheValue;
+            }
+        }
+
+        var value = candidates.Any(HasPlaywrightChromiumAt);
+        lock (BrowserDependencyCacheLock)
+        {
+            _browserDependencyCacheKey = cacheKey;
+            _browserDependencyCacheAt = DateTimeOffset.UtcNow;
+            _browserDependencyCacheValue = value;
+        }
+
+        return value;
     }
 
     private static bool HasPlaywrightChromiumAt(string browsersPath)
@@ -222,10 +250,72 @@ public sealed class DependencyInstallerService
     }
 
     private static string Quote(string value) => "\"" + value.Replace("\"", "\\\"") + "\"";
+
+    private static DependencySource InferDefaultSource()
+    {
+        if (IsMainlandChinaEnvironment())
+            return DependencySource.Cn;
+
+        return DependencySource.Global;
+    }
+
+    private static bool IsMainlandChinaEnvironment()
+    {
+        var cultureHints = new[]
+        {
+            CultureInfo.CurrentCulture.Name,
+            CultureInfo.CurrentUICulture.Name,
+            CultureInfo.CurrentCulture.TwoLetterISOLanguageName,
+            CultureInfo.CurrentUICulture.TwoLetterISOLanguageName,
+            SafeCurrentRegionName(),
+            UserTimeZoneService.GetDefaultTimeZoneId()
+        };
+
+        foreach (var hint in cultureHints)
+        {
+            if (string.IsNullOrWhiteSpace(hint))
+                continue;
+
+            var value = hint.Trim();
+            if (value.Equals("CN", StringComparison.OrdinalIgnoreCase)
+                || value.EndsWith("-CN", StringComparison.OrdinalIgnoreCase)
+                || value.Equals("zh-CN", StringComparison.OrdinalIgnoreCase)
+                || value.Equals("zh-Hans", StringComparison.OrdinalIgnoreCase)
+                || value.Contains("China Standard Time", StringComparison.OrdinalIgnoreCase)
+                || value.Contains("Asia/Shanghai", StringComparison.OrdinalIgnoreCase)
+                || value.Contains("Asia/Chongqing", StringComparison.OrdinalIgnoreCase)
+                || value.Contains("Asia/Harbin", StringComparison.OrdinalIgnoreCase)
+                || value.Contains("Asia/Urumqi", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static string? SafeCurrentRegionName()
+    {
+        try
+        {
+            return RegionInfo.CurrentRegion.TwoLetterISORegionName;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string DescribeSource(DependencySource requested, DependencySource effective)
+    {
+        var effectiveText = effective == DependencySource.Cn ? "CN optimized" : "Global official";
+        return requested == DependencySource.Auto ? $"Auto -> {effectiveText}" : effectiveText;
+    }
 }
 
 public enum DependencySource
 {
+    Auto,
     Global,
     Cn
 }
