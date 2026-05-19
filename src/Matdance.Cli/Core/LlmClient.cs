@@ -57,10 +57,11 @@ public class LlmClient
         var url = GetOpenAiChatCompletionsUrl();
         var thinkingMode = GetThinkingParameterMode();
         var supportsThinking = SupportsThinkingModel();
-        var thinkingEnabled = !ThinkingTemporarilyDisabled && supportsThinking && (enableThinking ?? true);
+        var forceMimoThinking = IsMimoModel();
+        var thinkingEnabled = supportsThinking && (forceMimoThinking || (!ThinkingTemporarilyDisabled && (enableThinking ?? true)));
         var requestTemperature = GetRequestTemperature(thinkingMode, thinkingEnabled);
-        var includeReasoningContent = !ThinkingTemporarilyDisabled
-            && (thinkingEnabled || messages.Any(message => !string.IsNullOrWhiteSpace(message.ReasoningContent)));
+        var includeReasoningContent = forceMimoThinking
+            || (!ThinkingTemporarilyDisabled && (thinkingEnabled || messages.Any(message => !string.IsNullOrWhiteSpace(message.ReasoningContent))));
         var hasImageAttachments = messages.Any(HasImageAttachment);
         var cachedVisionSupport = hasImageAttachments ? ModelCapabilityCacheService.GetVisionSupport(_config) : null;
         var includeImageAttachments = hasImageAttachments && cachedVisionSupport != false;
@@ -83,6 +84,7 @@ public class LlmClient
                 thinkingEnabled,
                 requestTemperature,
                 includeImageAttachments,
+                forceAssistantReasoningContent: forceMimoThinking,
                 stream: onStreamChunk != null);
             var json = payload.ToJsonString();
 
@@ -196,7 +198,7 @@ public class LlmClient
         return new ChatMessage { Role = role, Content = content, ReasoningContent = reasoningContent, ToolCalls = toolCalls, Timestamp = UserTimeZoneService.Now() };
     }
 
-    private static JsonArray ToOpenAiMessagesNode(IEnumerable<ChatMessage> messages, bool includeReasoningContent, bool includeImageAttachments = false)
+    private static JsonArray ToOpenAiMessagesNode(IEnumerable<ChatMessage> messages, bool includeReasoningContent, bool includeImageAttachments = false, bool forceAssistantReasoningContent = false)
     {
         var result = new JsonArray();
         var list = messages.ToList();
@@ -222,20 +224,20 @@ public class LlmClient
             {
                 if (TryCollectCompleteToolResultBlock(list, i, out var toolMessages, out var nextIndex))
                 {
-                    result.Add(CreateOpenAiMessageObject(message, includeReasoningContent, includeToolCalls: true, includeImageAttachments: false));
+                    result.Add(CreateOpenAiMessageObject(message, includeReasoningContent, includeToolCalls: true, includeImageAttachments: false, forceAssistantReasoningContent));
                     foreach (var toolMessage in toolMessages)
                     {
-                        result.Add(CreateOpenAiMessageObject(toolMessage, includeReasoningContent, includeToolCalls: false, includeImageAttachments: false));
+                        result.Add(CreateOpenAiMessageObject(toolMessage, includeReasoningContent, includeToolCalls: false, includeImageAttachments: false, forceAssistantReasoningContent));
                     }
                     i = nextIndex - 1;
                     continue;
                 }
 
-                result.Add(CreateHistoricalAssistantWithoutToolCalls(message, includeReasoningContent));
+                result.Add(CreateHistoricalAssistantWithoutToolCalls(message, includeReasoningContent, forceAssistantReasoningContent));
                 continue;
             }
 
-            result.Add(CreateOpenAiMessageObject(message, includeReasoningContent, includeToolCalls: false, includeImageAttachments: attachImages));
+            result.Add(CreateOpenAiMessageObject(message, includeReasoningContent, includeToolCalls: false, includeImageAttachments: attachImages, forceAssistantReasoningContent));
         }
 
         return result;
@@ -277,7 +279,7 @@ public class LlmClient
             && toolMessages.All(item => !string.IsNullOrWhiteSpace(item.ToolCallId) && expectedIds.Contains(item.ToolCallId));
     }
 
-    private static JsonObject CreateHistoricalAssistantWithoutToolCalls(ChatMessage message, bool includeReasoningContent)
+    private static JsonObject CreateHistoricalAssistantWithoutToolCalls(ChatMessage message, bool includeReasoningContent, bool forceAssistantReasoningContent)
     {
         var clone = new ChatMessage
         {
@@ -287,10 +289,10 @@ public class LlmClient
                 : message.Content,
             ReasoningContent = message.ReasoningContent
         };
-        return CreateOpenAiMessageObject(clone, includeReasoningContent, includeToolCalls: false, includeImageAttachments: false);
+        return CreateOpenAiMessageObject(clone, includeReasoningContent, includeToolCalls: false, includeImageAttachments: false, forceAssistantReasoningContent);
     }
 
-    private static JsonObject CreateOpenAiMessageObject(ChatMessage message, bool includeReasoningContent, bool includeToolCalls, bool includeImageAttachments)
+    private static JsonObject CreateOpenAiMessageObject(ChatMessage message, bool includeReasoningContent, bool includeToolCalls, bool includeImageAttachments, bool forceAssistantReasoningContent)
     {
         var role = NormalizeRole(message.Role);
         var item = new JsonObject
@@ -315,7 +317,7 @@ public class LlmClient
 
         if (includeReasoningContent
             && role.Equals("assistant", StringComparison.OrdinalIgnoreCase)
-            && (!string.IsNullOrWhiteSpace(message.ReasoningContent) || (includeToolCalls && message.ToolCalls is { Count: > 0 })))
+            && (forceAssistantReasoningContent || !string.IsNullOrWhiteSpace(message.ReasoningContent) || (includeToolCalls && message.ToolCalls is { Count: > 0 })))
         {
             item["reasoning_content"] = message.ReasoningContent ?? string.Empty;
         }
@@ -1343,12 +1345,13 @@ public class LlmClient
         bool thinkingEnabled,
         float requestTemperature,
         bool includeImageAttachments,
+        bool forceAssistantReasoningContent,
         bool stream)
     {
         var payload = new JsonObject
         {
             ["model"] = _config.ModelId,
-            ["messages"] = ToOpenAiMessagesNode(messages, includeReasoningContent, includeImageAttachments),
+            ["messages"] = ToOpenAiMessagesNode(messages, includeReasoningContent, includeImageAttachments, forceAssistantReasoningContent),
             ["temperature"] = requestTemperature,
             ["max_tokens"] = _config.MaxOutputToken,
             ["stream"] = stream
@@ -1401,12 +1404,17 @@ public class LlmClient
             || _config.BaseUrl.Contains("xiaomimimo.com", StringComparison.OrdinalIgnoreCase);
     }
 
+    private bool IsMimoModel()
+    {
+        return _config.ModelId.Contains("mimo", StringComparison.OrdinalIgnoreCase);
+    }
+
     private ThinkingParameterMode GetThinkingParameterMode()
     {
         if (IsKimiLikeApiOrModel())
             return ThinkingParameterMode.KimiPreservedObject;
 
-        if (IsDeepSeekApi() || IsZaiApi() || IsXiaomiMimoApi())
+        if (IsDeepSeekApi() || IsZaiApi() || IsXiaomiMimoApi() || IsMimoModel())
             return ThinkingParameterMode.TypeObject;
 
         return ThinkingParameterMode.ReasoningEffort;
@@ -1416,6 +1424,7 @@ public class LlmClient
     {
         return ModelProviderCatalog.FindModel(_config.ApiType, _config.ModelId)?.SupportsThinking == true
             || (IsDeepSeekApi() && IsDeepSeekThinkingModel(_config.ModelId))
+            || IsMimoModel()
             || IsKimiLikeApiOrModel();
     }
 

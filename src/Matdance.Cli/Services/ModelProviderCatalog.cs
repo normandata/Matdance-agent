@@ -10,6 +10,7 @@ public static class ModelProviderCatalog
     public const string ZaiGlmCodingPlan = "zai_glm_coding_plan";
     public const string BaiduQianfanCodingPlan = "baidu_qianfan_coding_plan";
     public const string XiaomiMimo = "xiaomi_mimo";
+    public const string XiaomiMimoTokenPlan = "xiaomi_mimo_token_plan";
     public const string Anthropic = "anthropic";
 
     private const string DeepSeekBaseUrl = "https://api.deepseek.com";
@@ -22,6 +23,8 @@ public static class ModelProviderCatalog
     private const string BaiduQianfanApiKeyUrl = "https://console.bce.baidu.com/qianfan/ais/console/applicationConsole/application";
     private const string XiaomiMimoBaseUrl = "https://api.xiaomimimo.com/v1";
     private const string XiaomiMimoApiKeyUrl = "https://platform.xiaomimimo.com/#/console/api-keys";
+    private const string XiaomiMimoTokenPlanBaseUrl = "https://token-plan-cn.xiaomimimo.com/v1";
+    private const string XiaomiMimoTokenPlanApiKeyUrl = "https://platform.xiaomimimo.com/console/plan-manage";
 
     private static readonly List<ModelProviderDefinition> Definitions = new()
     {
@@ -130,6 +133,25 @@ public static class ModelProviderCatalog
             Label = "Xiaomi MiMo",
             BaseUrl = XiaomiMimoBaseUrl,
             ApiKeyUrl = XiaomiMimoApiKeyUrl,
+            ManagedDefaults = true,
+            LocksBaseUrl = true,
+            LocksModelId = true,
+            LocksTokenLimits = true,
+            Models = new List<ModelPreset>
+            {
+                new ModelPreset { Id = "mimo-v2.5-pro", ContextWindow = 1_000_000, MaxOutputToken = 131_072, SupportsThinking = true },
+                new ModelPreset { Id = "mimo-v2.5", ContextWindow = 1_000_000, MaxOutputToken = 32_768, SupportsThinking = true },
+                new ModelPreset { Id = "mimo-v2-pro", ContextWindow = 1_000_000, MaxOutputToken = 131_072, SupportsThinking = true },
+                new ModelPreset { Id = "mimo-v2-omni", ContextWindow = 256_000, MaxOutputToken = 32_768, SupportsThinking = true },
+                new ModelPreset { Id = "mimo-v2-flash", ContextWindow = 256_000, MaxOutputToken = 65_536, SupportsThinking = true }
+            }
+        },
+        new ModelProviderDefinition
+        {
+            Id = XiaomiMimoTokenPlan,
+            Label = "Xiaomi MiMo Token Plan",
+            BaseUrl = XiaomiMimoTokenPlanBaseUrl,
+            ApiKeyUrl = XiaomiMimoTokenPlanApiKeyUrl,
             ManagedDefaults = true,
             LocksBaseUrl = true,
             LocksModelId = true,

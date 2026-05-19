@@ -102,11 +102,6 @@ For complete startup, entry registration, hosted Web UI, model configuration, an
 - [docs/tools-and-multimodal.md](docs/tools-and-multimodal.md): tools, browser automation, and multimodal paths.
 - [docs/runtime-and-development.md](docs/runtime-and-development.md): supervisor, runtime, and development notes.
 
-## Known Issues
-
-- **Skill organization carries context debt**: splitting only by "session" rather than by new messages, target skill, and merge stages can still hit model input limits during long sessions or giant tool outputs. The full fix is incremental ingest, skill work locks / journal, single-skill apply, pairwise merge, and adaptive degrade/recover.
-- **Anthropic compatibility path has a synchronous disk I/O bottleneck**: `ModelCapabilityCacheService` does `lock (Gate) { ReadState(); WriteState(); }` after every Anthropic request success (`LlmClient.cs:1092`). The OpenAI path is not affected. This stalls the Anthropic streaming response between header return and body read, especially under high concurrency. Root cause is confirmed; the fix is in-memory cache + background async flush, but it is deferred and recorded as known technical debt for now.
-
 ## Runtime Boundaries
 
 Matdance is local-first software, not a cloud multi-user platform. By default, the Web UI should bind only to loopback addresses. Remote binding must be explicitly enabled and uses single-token authentication.

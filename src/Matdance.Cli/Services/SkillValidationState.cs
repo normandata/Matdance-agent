@@ -99,19 +99,12 @@ public static class SkillValidationState
 
     public static bool NeedsValidation(string skillDir)
     {
-        if (!EnsureReportCurrent(skillDir))
-            return true;
+        return NeedsAutomaticValidation(skillDir);
+    }
 
-        var reportPath = GetReportPath(skillDir);
-        if (!File.Exists(reportPath))
-            return true;
-
-        var report = File.ReadAllText(reportPath);
-        var status = (ExtractMetadata(report, "Status") ?? string.Empty).Trim().ToLowerInvariant();
-        if (status == "valid")
-            return false;
-
-        return true;
+    public static bool NeedsAutomaticValidation(string skillDir)
+    {
+        return !EnsureReportCurrent(skillDir) || !File.Exists(GetReportPath(skillDir));
     }
 
     public static string ComputeFingerprint(string skillDir)

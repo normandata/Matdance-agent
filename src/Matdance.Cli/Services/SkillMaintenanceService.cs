@@ -47,12 +47,12 @@ public sealed class SkillMaintenanceService
         return StartJob(agent, "organize", null, ExecuteOrganizationAsync, ct);
     }
 
-    public string StartValidation(string agent, string skillId, CancellationToken ct = default)
+    public string StartValidation(string agent, string skillId, CancellationToken ct = default, bool automatic = false)
     {
         if (string.IsNullOrWhiteSpace(skillId))
             throw new InvalidOperationException("Missing skill id.");
 
-        return StartJob(agent, "validate", skillId, ExecuteValidationAsync, ct);
+        return StartJob(agent, "validate", skillId, ExecuteValidationAsync, ct, automatic);
     }
 
     public string StartLearningValidation(string agent, SkillLearnRequest request, CancellationToken ct = default)
@@ -94,16 +94,19 @@ public sealed class SkillMaintenanceService
     }
 
     public IReadOnlyList<SkillSummary> ListUnverifiedSkills(string agent)
+        => ListAutomaticValidationCandidates(agent);
+
+    public IReadOnlyList<SkillSummary> ListAutomaticValidationCandidates(string agent)
     {
         var skillService = new SkillService(_path);
         return skillService.List(agent).Skills
-            .Where(skill => SkillValidationState.NeedsValidation(_path.GetSkillPath(agent, skill.Id)))
+            .Where(skill => SkillValidationState.NeedsAutomaticValidation(_path.GetSkillPath(agent, skill.Id)))
             .Where(skill => !HasRunningJob(agent, "validate", skill.Id))
             .OrderBy(skill => skill.Id, StringComparer.OrdinalIgnoreCase)
             .ToList();
     }
 
-    private string StartJob(string agent, string kind, string? skillId, Func<SkillJob, CancellationToken, Task> execute, CancellationToken ct)
+    private string StartJob(string agent, string kind, string? skillId, Func<SkillJob, CancellationToken, Task> execute, CancellationToken ct, bool automatic = false)
     {
         lock (Lock)
         {
@@ -122,6 +125,7 @@ public sealed class SkillMaintenanceService
                 Agent = agent,
                 Kind = kind,
                 SkillId = skillId,
+                Automatic = automatic,
                 Status = "running",
                 Progress = 0,
                 Stage = "Preparing...",
@@ -746,6 +750,7 @@ public sealed class SkillMaintenanceService
         return await llm.SendAsync(messages, new List<ToolDefinition>(), _ => { }, ct,
             async (attempt, delay, error, token) =>
             {
+                ThrowIfAutomaticRateLimited(job, error);
                 job.Stage = $"Subagent retrying ({attempt}); next probe in {delay.TotalSeconds:F0}s.";
                 await Task.CompletedTask;
             },
@@ -844,6 +849,7 @@ public sealed class SkillMaintenanceService
             var assistant = await llm.SendAsync(messages, tools, _ => { }, ct,
                 async (attempt, delay, error, token) =>
                 {
+                    ThrowIfAutomaticRateLimited(job, error);
                     job.Stage = $"Validation subagent retrying ({attempt}); next probe in {delay.TotalSeconds:F0}s.";
                     await Task.CompletedTask;
                 },
@@ -888,6 +894,7 @@ public sealed class SkillMaintenanceService
             last = await llm.SendAsync(messages, new List<ToolDefinition>(), _ => { }, ct,
                 async (attempt, delay, error, token) =>
                 {
+                    ThrowIfAutomaticRateLimited(job, error);
                     job.Stage = $"Validation report generation retrying ({attempt}); next probe in {delay.TotalSeconds:F0}s.";
                     await Task.CompletedTask;
                 },
@@ -2334,6 +2341,25 @@ public sealed class SkillMaintenanceService
         };
     }
 
+    private static void ThrowIfAutomaticRateLimited(SkillJob job, Exception error)
+    {
+        if (!job.Automatic || !IsRateLimitOrQuotaFailure(error))
+            return;
+
+        throw new AutomaticSkillValidationDeferredException("Automatic skill validation deferred after retry-limited provider response: " + error.Message, error);
+    }
+
+    private static bool IsRateLimitOrQuotaFailure(Exception error)
+    {
+        var message = error.Message ?? string.Empty;
+        return message.Contains("429", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("rate_limit", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("rate limit", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("quota", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("limit has been exceeded", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("high demand", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static void FailJob(SkillJob job, Exception ex)
     {
         job.Status = "failed";
@@ -2363,6 +2389,7 @@ public sealed class SkillJob
     public string Agent { get; set; } = string.Empty;
     public string Kind { get; set; } = string.Empty;
     public string? SkillId { get; set; }
+    public bool Automatic { get; set; }
     public string Status { get; set; } = "running";
     public int Progress { get; set; }
     public string Stage { get; set; } = string.Empty;
@@ -2371,6 +2398,13 @@ public sealed class SkillJob
     public string? Report { get; set; }
     public DateTimeOffset StartedAt { get; set; }
     public DateTimeOffset? FinishedAt { get; set; }
+}
+
+internal sealed class AutomaticSkillValidationDeferredException : Exception
+{
+    public AutomaticSkillValidationDeferredException(string message, Exception innerException) : base(message, innerException)
+    {
+    }
 }
 
 internal sealed class SkillOrganizationResult

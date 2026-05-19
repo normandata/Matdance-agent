@@ -100,11 +100,6 @@ Windows 对应：
 - [docs/zh-CN/tools-and-multimodal.md](docs/zh-CN/tools-and-multimodal.md)：工具、浏览器与多模态。
 - [docs/zh-CN/runtime-and-development.md](docs/zh-CN/runtime-and-development.md)：运行守护与开发说明。
 
-## 已知技术债
-
-- **技能整理存在上下文债务**：如果只按"会话"切分，而不是按新增消息、目标 skill 和合并阶段切分，长会话或巨型 tool 输出仍可能触发模型输入上限。完整修复方向是增量 ingest、技能工作锁 / journal、单技能 apply、pairwise merge 和自适应降级回升。
-- **Anthropic 兼容路径存在同步磁盘 I/O 瓶颈**：`ModelCapabilityCacheService` 在每次 Anthropic 请求成功后都会走 `lock (Gate) { ReadState(); WriteState(); }`（`LlmClient.cs:1092`）。OpenAI 路径没有这个问题。这会导致 Anthropic 流式响应在 Header 返回后、正文读取前被磁盘写操作卡住，高并发时尤为明显。根因已确认，修复方向是内存缓存 + 后台异步刷盘，但暂不进入本版本，先记录为已知技术债。
-
 ## 运行边界
 
 Matdance 是本地优先系统，不是云端多用户平台。默认 Web UI 只绑定本机地址；远程绑定需要显式开启，并使用单 token 鉴权。

@@ -81,7 +81,7 @@ public static class PromptBuilder
         sb.AppendLine("12. **Continuation Discipline**: If tool results show unfinished work, continue the task instead of ending the turn. Provide a final response only after the task is complete or you are blocked and explain the blocker.");
         sb.AppendLine("13. **No Repetition Loop**: Never repeat the same user-facing answer or call `memory_store` again with the same content in the same turn. Treat `memory_store` as a closing side effect; after it succeeds, do not restate the same final answer.");
         sb.AppendLine("14. **Thinking / Reasoning Boundary**: `/think`, `thinking`, `reasoning`, and `reasoning_content` are private reasoning text. Matdance will not parse `{show_file:PATH}`, `{play_audio:TYPE}`, or plain-text pseudo tool requests from those channels.");
-        sb.AppendLine("    - Thinking mode is temporarily disabled globally. Do not try to emit hidden reasoning, `/think` blocks, or preserved thinking text; use concise visible planning when needed and real tool calls for actions.");
+        sb.AppendLine("    - Thinking mode is disabled for normal providers. Matdance may still preserve provider-required `reasoning_content` for MiMo compatibility; do not expose it, duplicate it, or try to emit hidden reasoning, `/think` blocks, or preserved thinking text yourself. Use concise visible planning when needed and real tool calls for actions.");
         sb.AppendLine("    - Never write tool JSON, function-call schemas, pseudo tool calls, `{show_file:PATH}`, `{play_audio:TYPE}`, or other Matdance control markers inside thinking/reasoning text.");
         sb.AppendLine("    - If you need a tool, use the real assistant tool-call channel. Some providers, including Kimi/Moonshot, may return real protocol-level `tool_calls` alongside `reasoning_content`; those are supported. Do not duplicate them as text.");
         sb.AppendLine("    - Use thinking only for reasoning. Use the visible final reply for user-facing text and the real tool-call channel for tools.");
@@ -95,6 +95,7 @@ public static class PromptBuilder
         sb.AppendLine("    - Important: Do not wait for the user to ask. If you learned something useful, proactively capture it via `skill_create` or `skill_editor` before ending the turn.");
         sb.AppendLine("16. **Skill Retrieval and Maintenance**: Before starting any non-trivial task, scan the [Skills] section. If a relevant skill exists, call `skill_read` to load its full content plus validation/import notes, then follow its guidance. Skills override general knowledge when they conflict, but validation/import notes override stale skill prose.");
         sb.AppendLine("    - If `skill_read` shows `needs_changes`, unsupported assumptions, stale examples, broken paths, missing prerequisites, or contradictions with observed behavior, treat that as maintenance work: use `skill_editor` to repair the skill when the fix is clear, then continue the user task with the repaired understanding.");
+        sb.AppendLine("    - If real task use shows the skill does not match the actual business case or has a clear expected improvement, use `skill_editor` to update it before ending the turn when the fix is evidence-based. Do not rewrite skills on guesses.");
         sb.AppendLine("    - If you discover during use that a skill's description, instructions, resource references, or examples are inaccurate, proactively update the skill before ending the turn. Do not leave durable skill defects only as chat advice.");
         sb.AppendLine("17. **Browser Automation**: Matdance has a pre-warmed Chromium browser running in the background (shared globally, not per-session). When you need to browse the web, scrape data, fill forms, or interact with web apps, use the `browser_*` tools.");
         sb.AppendLine("    - The browser is already warm: `browser_navigate` will respond immediately without cold-start delay.");
@@ -452,6 +453,7 @@ public static class PromptBuilder
         sb.AppendLine("Skill Guidelines:");
         sb.AppendLine("- Before starting a task, check if any skill is relevant and read it via `skill_read`; review the attached validation/import notes before trusting the skill.");
         sb.AppendLine("- After completing a workflow that might be reusable, create or update a skill via `skill_create` or `skill_editor`.");
+        sb.AppendLine("- If actual use shows a skill does not fit the business case or has a clear improvement, update it with `skill_editor` when the fix is evidence-based.");
         sb.AppendLine("- If a skill is useful but inaccurate, incomplete, contradicted by reports, or missing resource references, update it with `skill_editor` instead of only reporting the issue.");
         sb.AppendLine("- Skills are stored in the agent's skills directory and persist across sessions.");
         sb.AppendLine();

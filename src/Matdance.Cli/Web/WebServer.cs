@@ -131,6 +131,12 @@ public sealed class WebServer
             var request = await context.Request.ReadFromJsonAsync<SecuritySettings>(JsonOptions, context.RequestAborted);
             return Results.Json(new SecuritySettingsService().Save(request ?? new SecuritySettings()), JsonOptions);
         });
+        app.MapGet("/api/skill-validation-settings", () => Results.Json(new SkillValidationSettingsService().Load(), JsonOptions));
+        app.MapPost("/api/skill-validation-settings", async (HttpContext context) =>
+        {
+            var request = await context.Request.ReadFromJsonAsync<SkillValidationSettings>(JsonOptions, context.RequestAborted);
+            return Results.Json(new SkillValidationSettingsService().Save(request ?? new SkillValidationSettings()), JsonOptions);
+        });
         app.MapGet("/api/agent-config", (string agent) => Results.Json(LoadAgentConfigDto(agent), JsonOptions));
         app.MapGet("/api/multimodal-config", (string agent) => GetMultiModalConfigHttp(agent));
         app.MapPost("/api/multimodal-config", (Func<HttpContext, Task<IResult>>)SaveMultiModalConfigHttp);

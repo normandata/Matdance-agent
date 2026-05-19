@@ -1125,6 +1125,8 @@ public static class WebPage
     .settings-section-grid { display: grid; grid-template-columns: minmax(228px, var(--unit-fr)) minmax(0, var(--phi-fr)); gap: 14px; align-items: stretch; }
     .settings-card { min-width: 0; border-radius: 18px; padding: 15px; background: linear-gradient(180deg,rgba(255,255,255,.052),rgba(255,255,255,.026)); box-shadow: inset 0 1px 0 rgba(255,255,255,.045); }
     .settings-language-card { min-height: 170px; display: grid; grid-template-rows: 1fr auto; gap: 14px; align-content: space-between; }
+    .settings-skill-validation-card { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr; gap: 14px; align-items: start; }
+    .settings-skill-validation-controls { align-self: start; }
     .settings-events-card { grid-column: 1 / -1; min-height: 354px; display: grid; grid-template-rows: auto auto auto minmax(0, .7fr) minmax(0, 1.3fr); gap: 12px; align-content: stretch; }
     .settings-events-card .settings-save-row { margin-top: 0; }
     .settings-events-row { display: grid; grid-template-columns: minmax(210px, 1fr) auto; gap: 10px; align-items: end; }
@@ -1145,7 +1147,7 @@ public static class WebPage
     .settings-memory-limits .field { margin: 0; min-width: 0; padding: 12px; border: 1px solid rgba(255,255,255,.075); border-radius: 15px; background: rgba(3,7,16,.24); }
     .settings-memory-limits .field label { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; margin-bottom: 8px; }
     .settings-memory-limits .field label span:last-child { max-width: none; padding: 3px 7px; border-radius: 999px; background: rgba(100,219,255,.08); color: var(--faint); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
-    .settings-memory-limits input { width: 100%; min-height: 42px; border-radius: 12px; font-family: ui-monospace,SFMono-Regular,Consolas,monospace; font-size: 13px; }
+    .settings-memory-limits input, .settings-memory-limits select { width: 100%; min-height: 42px; border-radius: 12px; font-family: ui-monospace,SFMono-Regular,Consolas,monospace; font-size: 13px; }
     .settings-save-row { display: flex; justify-content: flex-start; margin-top: -2px; }
     .settings-save-row button { width: auto; min-width: 132px; min-height: 38px; border-radius: 12px; }
     .settings-sound-layout { display: grid; grid-template-columns: 1fr; gap: 14px; align-items: start; }
@@ -1220,7 +1222,7 @@ public static class WebPage
       .settings-status-card { grid-column: 1 / -1; }
     }
     @media (max-width: 920px) {
-      .settings-section-grid, .settings-memory-layout, .settings-memory-card, .settings-sound-layout, .settings-events-row, .sound-cue-row, .sound-cue-group-head, .sound-cue-board, .sound-cue-master-controls, .sound-cue-group-body, .sound-cue-custom-form, .sound-cue-custom-edit { grid-template-columns: 1fr; }
+      .settings-section-grid, .settings-memory-layout, .settings-memory-card, .settings-skill-validation-card, .settings-sound-layout, .settings-events-row, .sound-cue-row, .sound-cue-group-head, .sound-cue-board, .sound-cue-master-controls, .sound-cue-group-body, .sound-cue-custom-form, .sound-cue-custom-edit { grid-template-columns: 1fr; }
       .sound-cue-group-count { justify-self: start; }
       .settings-save-row { grid-column: 1; }
       .settings-language-card { min-height: auto; }
@@ -2151,6 +2153,18 @@ public static class WebPage
                   <label class="sound-cue-toggle" for="privacyAccessToggle"><span id="privacyAccessToggleLabel">Allow private data access</span><input id="privacyAccessToggle" type="checkbox" /></label>
                   <span class="muted-status" id="privacyAccessState">Default off</span>
                 </section>
+                <section class="control-card settings-card settings-skill-validation-card">
+                  <div class="settings-card-copy">
+                    <strong id="skillValidationTitle">Skill Validation</strong>
+                    <p id="skillValidationDesc">Queue automatic skill validation globally so idle checks stay low-volume and serial.</p>
+                    <label class="sound-cue-toggle" for="skillValidationEnabled"><span id="skillValidationEnabledLabel">Enable automatic validation</span><input id="skillValidationEnabled" type="checkbox" /></label>
+                    <span class="muted-status" id="skillValidationState">Every 6 hours, validate 1 skill serially.</span>
+                  </div>
+                  <div class="settings-memory-limits settings-skill-validation-controls">
+                    <div class="field"><label for="skillValidationIntervalHours"><span id="skillValidationIntervalLabel">Interval</span><span id="skillValidationIntervalMeta">hours</span></label><input id="skillValidationIntervalHours" type="number" min="1" max="168" step="1" value="6" /></div>
+                    <div class="field"><label for="skillValidationBatchSize"><span id="skillValidationBatchLabel">Batch Size</span><span id="skillValidationBatchMeta">max 3</span></label><select id="skillValidationBatchSize"><option value="1">1</option><option value="2">2</option><option value="3">3</option></select></div>
+                  </div>
+                </section>
                 <section class="control-card settings-card settings-events-card">
                   <div class="settings-card-copy">
                     <strong id="runtimeEventsTitle">Background Events</strong>
@@ -2404,7 +2418,7 @@ public static class WebPage
       const languages = Array.isArray(navigator.languages) && navigator.languages.length ? navigator.languages : [navigator.language || navigator.userLanguage || ''];
       return languages.some(lang => String(lang || '').toLowerCase().startsWith('zh')) ? 'zh' : 'en';
     }
-    const state = { agents: [], sessions: [], agent: null, session: null, busy: false, abortController: null, matrixTimer: null, commandIndex: 0, activeTab: 'home', settingsSection: 'general', runtimeEventsTimer: null, runtimeEventsAgent: null, schedulePage: 1, schedulePageSize: 8, scheduledTasks: null, scheduledSelected: null, lang: preferredLanguage(), memoryTab: 'core', memoryPage: 1, memoryPageSize: 10, memoryItems: null, memorySelectedItem: null, memorySnapshots: [], memoryVectorAtlas: null, memoryVectorResults: null, memoryVectorHover: null, memoryVectorPinned: null, memoryOrganizing: false, skillsWorking: false, skillsLearnFiles: [], selectedSkillValidationReport: null, selectedSkillImportReport: null, browserOpen: false, browserWs: null, browserMaximized: false, chatNearBottom: true, chatFollowStream: true, chatUserScrollIntentAt: 0, chatProgrammaticScrollUntil: 0, suppressChatAutoScroll: false, chatAttachments: [], multimodal: null, securitySettings: null, modelProviders: [], audioPlayer: null, audioUrl: null, audioButton: null, ttsErrorTimer: null, soundCues: null, soundCueGroup: 'flow', soundCuePlayer: null, soundCueQueue: [], soundCuePlaying: false, soundCuePrimed: false, soundCueBlocked: false, soundCueUploadType: null, soundCueSaveTimer: null, soundCueLastPlayedAt: {}, soundCueIdleResolvers: [], scheduledNoticeKeys: new Set(), imageNoticeKeys: new Set(), hostNoticeContinuationRunning: false, recorder: null, recordChunks: [], voiceMode: false, voiceRecording: false, voiceCanceled: false, voiceStartY: 0, voiceStartAt: 0, voiceTimer: null, voiceSession: null, voicePointerId: null, labRecorder: null, labRecordChunks: [] };
+    const state = { agents: [], sessions: [], agent: null, session: null, busy: false, abortController: null, matrixTimer: null, commandIndex: 0, activeTab: 'home', settingsSection: 'general', runtimeEventsTimer: null, runtimeEventsAgent: null, schedulePage: 1, schedulePageSize: 8, scheduledTasks: null, scheduledSelected: null, lang: preferredLanguage(), memoryTab: 'core', memoryPage: 1, memoryPageSize: 10, memoryItems: null, memorySelectedItem: null, memorySnapshots: [], memoryVectorAtlas: null, memoryVectorResults: null, memoryVectorHover: null, memoryVectorPinned: null, memoryOrganizing: false, skillsWorking: false, skillsLearnFiles: [], selectedSkillValidationReport: null, selectedSkillImportReport: null, browserOpen: false, browserWs: null, browserMaximized: false, chatNearBottom: true, chatFollowStream: true, chatUserScrollIntentAt: 0, chatProgrammaticScrollUntil: 0, suppressChatAutoScroll: false, chatAttachments: [], multimodal: null, securitySettings: null, skillValidationSettings: null, modelProviders: [], audioPlayer: null, audioUrl: null, audioButton: null, ttsErrorTimer: null, soundCues: null, soundCueGroup: 'flow', soundCuePlayer: null, soundCueQueue: [], soundCuePlaying: false, soundCuePrimed: false, soundCueBlocked: false, soundCueUploadType: null, soundCueSaveTimer: null, soundCueLastPlayedAt: {}, soundCueIdleResolvers: [], scheduledNoticeKeys: new Set(), imageNoticeKeys: new Set(), hostNoticeContinuationRunning: false, recorder: null, recordChunks: [], voiceMode: false, voiceRecording: false, voiceCanceled: false, voiceStartY: 0, voiceStartAt: 0, voiceTimer: null, voiceSession: null, voicePointerId: null, labRecorder: null, labRecordChunks: [] };
     const APP_DESIGN_WIDTH = 1360;
     const APP_DESIGN_HEIGHT = 995;
     function updateAppScale() {
@@ -2729,8 +2743,8 @@ public static class WebPage
       labBrowserSpeechReady:'browser speech ready',
       labBrowserSpeechUnavailable:'browser speech unavailable'
     });
-    Object.assign(i18n.zh,{apiTypeHelp:'openai_chat 走 chat completions；DeepSeek / GLM / MiMo / 百度千帆 Coding Plan 会自动补全并锁定 Base URL、模型和额度预设；anthropic 表示 Messages 兼容端点，Base URL、模型 ID、上下文和输出上限都可自定义。',apiKeyLink:'从此处获取 API Key',modelDropdownLabel:'模型列表',modelDropdownEmpty:'没有匹配的模型 ID'});
-    Object.assign(i18n.en,{apiTypeHelp:'openai_chat uses chat completions. DeepSeek / GLM / MiMo / Baidu Qianfan Coding Plan auto-fill and lock provider presets. anthropic means a Messages-compatible endpoint; Base URL, model ID, context, and output limits are editable.',apiKeyLink:'Get API Key here',modelDropdownLabel:'Model list',modelDropdownEmpty:'No matching model IDs'});
+    Object.assign(i18n.zh,{apiTypeHelp:'openai_chat 走 chat completions；DeepSeek / GLM / MiMo / MiMo Token Plan / 百度千帆 Coding Plan 会自动补全并锁定 Base URL、模型和额度预设；anthropic 表示 Messages 兼容端点，Base URL、模型 ID、上下文和输出上限都可自定义。',apiKeyLink:'从此处获取 API Key',modelDropdownLabel:'模型列表',modelDropdownEmpty:'没有匹配的模型 ID'});
+    Object.assign(i18n.en,{apiTypeHelp:'openai_chat uses chat completions. DeepSeek / GLM / MiMo / MiMo Token Plan / Baidu Qianfan Coding Plan auto-fill and lock provider presets. anthropic means a Messages-compatible endpoint; Base URL, model ID, context, and output limits are editable.',apiKeyLink:'Get API Key here',modelDropdownLabel:'Model list',modelDropdownEmpty:'No matching model IDs'});
     Object.assign(i18n.zh,{
       cancel:'\u53d6\u6d88',start:'\u5f00\u59cb',skillsLearnValidate:'\u5b66\u4e60\u5e76\u9a8c\u8bc1',skillsLearnTitle:'\u5b66\u4e60\u5e76\u9a8c\u8bc1\u5916\u90e8\u6280\u80fd',skillsLearnDesc:'\u9009\u62e9\u6587\u4ef6\u3001\u6587\u4ef6\u5939\u3001zip \u538b\u7f29\u5305\uff0c\u6216\u7c98\u8d34\u7eaf\u6587\u672c\u3002\u5916\u90e8\u5185\u5bb9\u4f1a\u88ab\u5f53\u4f5c\u4e0d\u53ef\u4fe1\u8f93\u5165\u672c\u5730\u5316\u3002',
       skillsLearnNameHintLabel:'\u540d\u79f0\u63d0\u793a',skillsLearnPathLabel:'\u672c\u5730\u8def\u5f84',skillsLearnFileLabel:'\u6587\u4ef6\u6765\u6e90',skillsLearnTextLabel:'\u5916\u90e8\u6750\u6599',skillsLearnNameHintMeta:'\u53ef\u9009',skillsLearnPathMeta:'\u6587\u4ef6\u6216\u76ee\u5f55',skillsLearnFileMeta:'\u6587\u4ef6\u5939 / zip / txt / md',skillsLearnTextMeta:'\u4e0d\u53ef\u4fe1',skillsLearnNameHintPlaceholder:'\u53ef\u9009\uff0c\u4f8b\u5982\uff1a\u8bb0\u5fc6\u7ba1\u7406\u65b9\u6cd5',skillsLearnPathPlaceholder:'\u53ef\u9009\uff0c\u672c\u5730 skill \u6587\u4ef6\u3001zip \u6216\u76ee\u5f55\u8def\u5f84',skillsLearnTextPlaceholder:'\u53ef\u9009\uff0c\u7c98\u8d34\u5916\u90e8 skill/README/\u8bf4\u660e\u6587\u672c',
@@ -2952,6 +2966,30 @@ public static class WebPage
       ttsNoSpeakableText:'No speakable text for TTS.',
       ttsNoPlayableAudio:'TTS returned no playable audio.',
       sttFailedPrefix:'Speech recognition failed'
+    });
+    Object.assign(i18n.zh,{
+      skillValidationTitle:'\u6280\u80fd\u9a8c\u8bc1',
+      skillValidationDesc:'\u5168\u5c40\u961f\u5217\u4e32\u884c\u9a8c\u8bc1\u6280\u80fd\uff0c\u907f\u514d\u7a7a\u95f2\u540e\u53f0\u68c0\u67e5\u6d88\u8017\u8fc7\u591a\u8bf7\u6c42\u3002',
+      skillValidationEnabledLabel:'\u542f\u7528\u81ea\u52a8\u9a8c\u8bc1',
+      skillValidationIntervalLabel:'\u9a8c\u8bc1\u95f4\u9694',
+      skillValidationIntervalMeta:'\u5c0f\u65f6',
+      skillValidationBatchLabel:'\u6bcf\u8f6e\u6570\u91cf',
+      skillValidationBatchMeta:'\u6700\u591a 3',
+      skillValidationStateText:'\u6bcf {hours} \u5c0f\u65f6\u6700\u591a\u4e32\u884c\u9a8c\u8bc1 {count} \u4e2a\u6280\u80fd\u3002',
+      skillValidationDisabledState:'\u81ea\u52a8\u9a8c\u8bc1\u5df2\u5173\u95ed\uff1b\u624b\u52a8\u9a8c\u8bc1\u4e0d\u53d7\u5f71\u54cd\u3002',
+      skillValidationSaveFailed:'\u6280\u80fd\u9a8c\u8bc1\u8bbe\u7f6e\u4fdd\u5b58\u5931\u8d25'
+    });
+    Object.assign(i18n.en,{
+      skillValidationTitle:'Skill Validation',
+      skillValidationDesc:'Queue automatic validation globally; each window runs serial checks and avoids repeated needs_changes requests.',
+      skillValidationEnabledLabel:'Enable automatic validation',
+      skillValidationIntervalLabel:'Validation Interval',
+      skillValidationIntervalMeta:'hours',
+      skillValidationBatchLabel:'Batch Size',
+      skillValidationBatchMeta:'max 3',
+      skillValidationStateText:'Every {hours} hours, validate up to {count} skill(s) serially.',
+      skillValidationDisabledState:'Automatic validation is off; manual validation still runs immediately.',
+      skillValidationSaveFailed:'Skill validation setting save failed'
     });
     function t(key, fallback) {
       const table = i18n[state.lang] ?? i18n.zh;
@@ -4231,7 +4269,7 @@ public static class WebPage
     function applyI18n() {
       const zh = state.lang === 'zh';
       document.documentElement.lang = zh ? 'zh-CN' : 'en';
-      ['send','stopResponse','newSession','refresh','agentReload','agentFormReload','agentSaveTop','agentSave','agentCreate','agentDelete','agentIconUpload','langToggle','chatJumpBottom','settingsSideTitle','settingsSideText','settingsReserveTitle','settingsReserveLanguage','settingsReserveTheme','settingsReserveShortcuts','settingsReserveAbout','settingsTitle','settingsSubtitle','settingsModeLabel','settingsNavGeneralTitle','settingsNavGeneralSub','settingsNavMemoryTitle','settingsNavMemorySub','settingsNavSoundTitle','settingsNavSoundSub','settingsNavMultiTitle','settingsNavMultiSub','settingsGeneralTitle','settingsGeneralDesc','settingsGeneralState','runtimeEventsTitle','runtimeEventsDesc','runtimeEventsReload','languageTitle','languageDescription','privacyAccessTitle','privacyAccessDesc','privacyAccessToggleLabel','soundCueTitle','soundCueDesc','soundCueEnabledLabel','soundCueVolumeLabel','soundCueDelayLabel','soundCueLibraryTitle','soundCueLibraryDesc','soundCueImport','soundCueExport','ttsErrorTitle','blankTitle','blankText','blankBack'].forEach(function(id) { setText(id, id === 'send' ? 'send' : id); });
+      ['send','stopResponse','newSession','refresh','agentReload','agentFormReload','agentSaveTop','agentSave','agentCreate','agentDelete','agentIconUpload','langToggle','chatJumpBottom','settingsSideTitle','settingsSideText','settingsReserveTitle','settingsReserveLanguage','settingsReserveTheme','settingsReserveShortcuts','settingsReserveAbout','settingsTitle','settingsSubtitle','settingsModeLabel','settingsNavGeneralTitle','settingsNavGeneralSub','settingsNavMemoryTitle','settingsNavMemorySub','settingsNavSoundTitle','settingsNavSoundSub','settingsNavMultiTitle','settingsNavMultiSub','settingsGeneralTitle','settingsGeneralDesc','settingsGeneralState','runtimeEventsTitle','runtimeEventsDesc','runtimeEventsReload','languageTitle','languageDescription','privacyAccessTitle','privacyAccessDesc','privacyAccessToggleLabel','skillValidationTitle','skillValidationDesc','skillValidationEnabledLabel','skillValidationIntervalLabel','skillValidationIntervalMeta','skillValidationBatchLabel','skillValidationBatchMeta','soundCueTitle','soundCueDesc','soundCueEnabledLabel','soundCueVolumeLabel','soundCueDelayLabel','soundCueLibraryTitle','soundCueLibraryDesc','soundCueImport','soundCueExport','ttsErrorTitle','blankTitle','blankText','blankBack'].forEach(function(id) { setText(id, id === 'send' ? 'send' : id); });
       setText('agentSaveTop', 'save');
       setText('agentSave', 'saveConfig');
       setText('agentReload', 'reload');
@@ -4310,6 +4348,7 @@ public static class WebPage
       setText('settingsSaveLimits', 'memoryLimitSave');
       updateSettingsSection();
       renderSecuritySettings();
+      renderSkillValidationSettings();
       renderSoundCueSettings();
       updateMultiModalLang();
       updateLabLang();
@@ -4380,6 +4419,72 @@ public static class WebPage
         $('hint').textContent = t('privacyAccessSaveFailed') + ': ' + (err.message || String(err));
       }
       renderSecuritySettings();
+    }
+
+    function defaultSkillValidationSettings() {
+      return { autoSkillValidationEnabled: true, autoSkillValidationIntervalHours: 6, autoSkillValidationBatchSize: 1 };
+    }
+
+    function normalizeSkillValidationSettings(settings) {
+      const defaults = defaultSkillValidationSettings();
+      const source = settings || defaults;
+      return {
+        autoSkillValidationEnabled: source.autoSkillValidationEnabled !== false,
+        autoSkillValidationIntervalHours: Math.max(1, Math.min(168, parseInt(source.autoSkillValidationIntervalHours || defaults.autoSkillValidationIntervalHours, 10) || defaults.autoSkillValidationIntervalHours)),
+        autoSkillValidationBatchSize: Math.max(1, Math.min(3, parseInt(source.autoSkillValidationBatchSize || defaults.autoSkillValidationBatchSize, 10) || defaults.autoSkillValidationBatchSize)),
+        updatedAt: source.updatedAt || null
+      };
+    }
+
+    async function loadSkillValidationSettings() {
+      try {
+        state.skillValidationSettings = normalizeSkillValidationSettings(await api('/api/skill-validation-settings'));
+      } catch {
+        state.skillValidationSettings = defaultSkillValidationSettings();
+      }
+      renderSkillValidationSettings();
+    }
+
+    function renderSkillValidationSettings() {
+      const settings = normalizeSkillValidationSettings(state.skillValidationSettings);
+      const enabled = !!settings.autoSkillValidationEnabled;
+      const enabledNode = $('skillValidationEnabled');
+      if (enabledNode) enabledNode.checked = enabled;
+      const intervalNode = $('skillValidationIntervalHours');
+      if (intervalNode) intervalNode.value = settings.autoSkillValidationIntervalHours;
+      const batchNode = $('skillValidationBatchSize');
+      if (batchNode) batchNode.value = String(settings.autoSkillValidationBatchSize);
+      const stateNode = $('skillValidationState');
+      if (stateNode) {
+        stateNode.textContent = enabled
+          ? t('skillValidationStateText')
+              .replace('{hours}', settings.autoSkillValidationIntervalHours)
+              .replace('{count}', settings.autoSkillValidationBatchSize)
+          : t('skillValidationDisabledState');
+      }
+    }
+
+    async function saveSkillValidationSettingsFromUi() {
+      const normalized = normalizeSkillValidationSettings({
+        autoSkillValidationEnabled: !!$('skillValidationEnabled')?.checked,
+        autoSkillValidationIntervalHours: $('skillValidationIntervalHours')?.value,
+        autoSkillValidationBatchSize: $('skillValidationBatchSize')?.value
+      });
+      const payload = {
+        autoSkillValidationEnabled: normalized.autoSkillValidationEnabled,
+        autoSkillValidationIntervalHours: normalized.autoSkillValidationIntervalHours,
+        autoSkillValidationBatchSize: normalized.autoSkillValidationBatchSize
+      };
+      try {
+        state.skillValidationSettings = normalizeSkillValidationSettings(await api('/api/skill-validation-settings', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(payload)
+        }));
+      } catch (err) {
+        $('hint').textContent = t('skillValidationSaveFailed') + ': ' + (err.message || String(err));
+      }
+      renderSkillValidationSettings();
     }
 
     function startRuntimeEventsSync() {
@@ -7242,7 +7347,7 @@ public static class WebPage
       if (target === 'schedule') await loadScheduledTasks();
       if (target === 'skills') await loadSkills();
       if (target === 'lab') await loadLab();
-      if (target === 'settings') { await Promise.all([loadMultiModalConfig(), loadSecuritySettings()]); updateSettingsSection(); }
+      if (target === 'settings') { await Promise.all([loadMultiModalConfig(), loadSecuritySettings(), loadSkillValidationSettings()]); updateSettingsSection(); }
       else { stopRuntimeEventsSync(); }
       if (target === 'memory') await loadMemory();
       if (target === 'chat') {
@@ -10862,6 +10967,11 @@ public static class WebPage
     });
     $('privacyAccessToggle')?.addEventListener('change', function() {
       saveSecuritySettingsFromUi();
+    });
+    ['skillValidationEnabled','skillValidationIntervalHours','skillValidationBatchSize'].forEach(function(id) {
+      $(id)?.addEventListener('change', function() {
+        saveSkillValidationSettingsFromUi();
+      });
     });
     $('soundCueEnabled')?.addEventListener('change', function(event) {
       const settings = loadSoundCueSettings();
