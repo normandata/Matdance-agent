@@ -2,7 +2,7 @@
 
 Language: English | [中文](FULL-DOC.zh-CN.md)
 
-Current version: v1.1.20-preview
+Current version: v1.1.20-hot-fix-2
 
 This file is the complete explanatory document for Matdance. `README.md`, `quickly_start.md`, and the topic documents under `docs/` stay concise so that entry points, commands, and local mechanisms are easy to find. If you want to understand what this system is doing, why it is shaped this way, and which boundaries must not be blurred, read this `FULL-DOC.md`. `FULL-DOC.md` and `FULL-DOC.zh-CN.md` should carry the same complete content; they differ only by language.
 
@@ -10,14 +10,15 @@ Matdance is not a forwarding shell with a chat window wrapped around it. It is a
 
 The problem it tries to solve is direct: let agents keep local state, organize experience, reuse skills, and leave files that a human can inspect at any time. "Continuous learning" here does not mean secretly training model weights, and it is not an agent roleplaying growth inside a chat box. Matdance accumulates Markdown, JSON, indexes, task records, run reports, and validation reports. Only something visible, editable, and movable deserves to be called long-term collaboration.
 
-## v1.1.20-preview Summary
+## v1.1.20-hot-fix-2 Summary
 
-v1.1.20-preview continues the boundary and reliability work from the previous preview releases.
+v1.1.20-hot-fix-2 continues the boundary and reliability work from the previous preview releases.
 
 - README was split into a concise entrance, topic documents, and this full document. README no longer carries every explanation.
 - Built-in memory organization and skill organization tasks now use stable English registration text, while the Web UI displays their titles and descriptions in the current UI language.
 - Background events and subtask stage text use stable English runtime data, avoiding mixed Chinese status text in the English UI.
 - Idle skill validation previously created a background request storm by repeatedly auto-retrying `needs_changes` skills. It now uses a global low-frequency deduplicated queue: default every 6 hours, serial validation, at most 3 per window, and current-fingerprint `needs_changes` / `invalid` reports no longer auto-retry.
+- Fixed: skill organization could exceed model context limits or keep retrying one problematic evidence range, blocking later skill discovery. Skill organization now downgrades and recovers batch size, uses round-based `skill_read` windows, injects tool calls without raw tool results, and skips repeatedly failing evidence ranges so the timeline can continue.
 - Skills can be exported as zip packages; importing still goes through learning and validation, so external skill packages do not bypass local safety checks.
 - Catch-up for built-in memory organization and skill organization is deduplicated by `agent + taskId`. If several triggers were missed while offline, each organizer is compensated once. Skill validation is not part of startup catch-up and remains driven by idle state.
 - Tasks created through `task_manager` keep at most 3 steps so long checklists do not overcrowd the Chat UI.
@@ -507,7 +508,9 @@ Skills should only record workflows that have been practiced, have clear results
 
 Skill organization may create skill-local resources such as scripts, templates, configuration examples, or reusable text, but those resources must live in safe subdirectories inside the skill directory. They must not reference nonexistent files, workspace files, absolute paths, Matdance runtime paths, or user private directories.
 
-Skill organization does not inject every full skill into context. It receives the skill index, then calls `skill_read` only for plausibly related skills. Skills may be merged only when platform, operating direction, and practical scope are highly aligned and the merged skill preserves concrete steps, commands, tool arguments, verification, and failure modes. Superseded duplicates are removed by host-applied `superseded_ids` or `delete` actions.
+Skill organization does not inject every full skill into context. It receives the skill index, then calls `skill_read` only for plausibly related skills. Fixed in `v1.1.20-hot-fix-2`: `skill_read` is now round-based, with a small adaptive window; after each round the subagent must decide whether every read skill is related or unrelated. Unrelated manuals are discarded before the next round, and existing skills can be updated, deleted, or superseded only after being retained as related. Source conversation tool results are not injected as raw text; tool call names and arguments remain as the reusable procedure evidence.
+
+Skill organization now follows a "fail downward, recover upward" strategy similar to memory organization. It reduces pending-message batch size or the `skill_read` window after context/payload/token or structured-output failures, then gradually recovers toward defaults after successful batches. If the same evidence range fails more than twice after downgrade attempts, it is skipped as a poison batch so later timeline evidence can still create or update skills.
 
 ### Scheduled Tasks
 

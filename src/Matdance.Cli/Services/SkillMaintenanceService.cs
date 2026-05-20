@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -17,9 +18,12 @@ public sealed class SkillMaintenanceService
     private const int MaxLearningFileChars = 40000;
     private const int MaxLearningFiles = 40;
     private const int MaxSkillSessionsPerStep = 1;
-    private const int MaxSkillSessionMessagesPerBatch = 40;
+    private const int DefaultSkillSessionMessagesPerBatch = 40;
+    private const int DefaultSkillReadWindowSize = 2;
+    private const int MaxSkillBatchFailuresBeforeSkip = 2;
     private const int MaxSkillMessageContentChars = 12000;
     private const int MaxSkillToolArgumentsChars = 8000;
+    private const int MaxRetainedSkillReadChars = 30000;
     private const int MaxSkillResourceFileChars = 200000;
     private static readonly HashSet<string> AllowedSkillResourceRoots = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -174,47 +178,40 @@ public sealed class SkillMaintenanceService
             }
 
             // === 少量多次策略：每步只处理 1 个会话，但在本 job 内循环全部处理完 ===
-            var batches = BuildSkillSessionBatches(sessions);
+            var globalState = _bookmarks.GetGlobalState(job.Agent);
+            var tuning = GetSkillOrganizationTuning(globalState);
+            var workItems = BuildSkillSessionWorkItems(sessions);
 
-            int step = 0;
-            int totalSteps = batches.Count;
+            var step = 0;
+            var estimatedSteps = EstimateSkillOrganizationSteps(workItems, tuning);
+            if (estimatedSteps == 0) estimatedSteps = 1;
             var allResults = new List<SkillOrganizationResult>();
             var allApplied = new List<string>();
 
-            while (batches.Count > 0)
+            while (workItems.Count > 0)
             {
                 step++;
                 ct.ThrowIfCancellationRequested();
 
-                var stepBatches = batches.Take(MaxSkillSessionsPerStep).ToList();
-                batches = batches.Skip(MaxSkillSessionsPerStep).ToList();
+                var outcome = await ProcessNextSkillOrganizationBatchAsync(
+                    job,
+                    skillService,
+                    workItems,
+                    tuning,
+                    globalState,
+                    step,
+                    estimatedSteps,
+                    ct);
 
-                // 每步重新获取最新技能列表（上一步可能已经创建了技能）
-                var existingSkills = skillService.List(job.Agent).Skills;
+                AdvanceSkillSessionWorkItems(workItems, outcome.Batch);
+                UpdateCompletedSkillSessionBookmarks(job.Agent, workItems);
+                UpdateSkillOrganizationTuningAfterOutcome(globalState, tuning, outcome);
+                PruneSkillBatchFailureState(globalState);
+                _bookmarks.UpdateGlobalState(job.Agent, globalState);
 
-                var stepMessageCount = stepBatches.Sum(batch => batch.Messages.Count);
-                job.Stage = $"Step {step}/{totalSteps}: analyzing {stepBatches.Count} session batch(es), {stepMessageCount} message(s), remaining {batches.Count}.";
-                job.Progress = (int)((step - 1) * 90.0 / totalSteps) + 5;
-
-                var messages = BuildOrganizationMessages(job.Agent, existingSkills, stepBatches);
-
-                var response = await RunSkillOrganizationSubagentAsync(job.Agent, messages, job, $"Skill extraction subagent analyzing (step {step}/{totalSteps})...", 40, ct);
-
-                job.Stage = $"Parsing skill extraction result (step {step}/{totalSteps})...";
-                job.Progress = (int)((step - 0.5) * 90.0 / totalSteps) + 5;
-
-                var result = DeserializeJsonFromResponse<SkillOrganizationResult>(response.Content);
-                if (result == null)
-                    throw new InvalidOperationException($"Skill organization subagent did not return structured JSON at step {step}/{totalSteps}.");
-
-                var applied = ApplyOrganizationResult(job.Agent, result, skillService);
-                allResults.Add(result);
-                allApplied.Add(applied);
-                foreach (var session in stepBatches.Where(batch => batch.CompletesSession))
-                {
-                    if (session.Bookmark != null)
-                        _bookmarks.UpdateSkillSessionBookmark(job.Agent, session.Bookmark);
-                }
+                allResults.Add(outcome.Result);
+                allApplied.Add(outcome.Applied);
+                estimatedSteps = Math.Max(step + EstimateSkillOrganizationSteps(workItems, tuning), step);
             }
 
             // 汇总所有步骤的报告
@@ -757,75 +754,287 @@ public sealed class SkillMaintenanceService
             enableThinking: false);
     }
 
-    private async Task<ChatMessage> RunSkillOrganizationSubagentAsync(string agent, List<ChatMessage> messages, SkillJob job, string stage, int progress, CancellationToken ct)
+    private async Task<SkillOrganizationRunResult> RunSkillOrganizationSubagentAsync(
+        string agent,
+        List<ChatMessage> baseMessages,
+        SkillJob job,
+        string stage,
+        int progress,
+        int skillReadWindowSize,
+        CancellationToken ct)
     {
         var config = AgentConfig.Load(_path.GetAgentConfigJsonPath(agent));
         var llm = new LlmClient(config);
-        var tools = ToolRegistry.GetAll(includeScheduledTaskTools: false)
-            .Where(t => t.Name is "skill_read")
-            .ToList();
+        var tools = skillReadWindowSize > 0
+            ? ToolRegistry.GetAll(includeScheduledTaskTools: false).Where(t => t.Name is "skill_read").ToList()
+            : new List<ToolDefinition>();
         var executor = new ToolExecutor(agent, _path, new SessionState(), allowInteractiveConfirmation: false);
+        var retainedSkills = new Dictionary<string, SkillReadContext>(StringComparer.OrdinalIgnoreCase);
+        var unrelatedSkillIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var relatedSkillIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         job.Stage = stage;
         job.Progress = progress;
 
         ChatMessage? last = null;
         var thinkingToolNoticeSent = false;
+        var inputWasDegraded = false;
         const int maxLoops = 18;
         for (var loop = 1; loop <= maxLoops; loop++)
         {
             ct.ThrowIfCancellationRequested();
-            job.Stage = $"{stage} Reading relevant skills when needed ({loop}/{maxLoops})...";
-            var assistant = await llm.SendAsync(messages, tools, _ => { }, ct,
-                async (attempt, delay, error, token) =>
-                {
-                    job.Stage = $"Skill organization subagent retrying ({attempt}); next probe in {delay.TotalSeconds:F0}s.";
-                    await Task.CompletedTask;
-                },
-                enableThinking: false);
+            job.Stage = $"{stage} skill_read window {skillReadWindowSize} ({loop}/{maxLoops})...";
+            var roundMessages = BuildSkillOrganizationRoundMessages(baseMessages, retainedSkills, unrelatedSkillIds, skillReadWindowSize);
+            var assistant = await SendSkillOrganizationMessageAsync(llm, roundMessages, tools, job, "Skill organization subagent", ct);
 
             if ((assistant.ToolCalls == null || assistant.ToolCalls.Count == 0) && !thinkingToolNoticeSent && LlmResponseGuard.HasTextualToolRequestInThinking(assistant))
             {
                 thinkingToolNoticeSent = true;
-                messages.Add(ChatMessage.User(LlmResponseGuard.ThinkingTextToolRequestNotice));
+                baseMessages = baseMessages.Concat(new[] { ChatMessage.User(LlmResponseGuard.ThinkingTextToolRequestNotice) }).ToList();
                 continue;
             }
 
             if (string.IsNullOrWhiteSpace(assistant.Content) && (assistant.ToolCalls == null || assistant.ToolCalls.Count == 0))
                 assistant.Content = "(no response)";
 
-            messages.Add(assistant);
             last = assistant;
-
             if (assistant.ToolCalls == null || assistant.ToolCalls.Count == 0)
             {
                 if (HasStructuredOrganizationJson(assistant.Content))
-                    return assistant;
+                    return new SkillOrganizationRunResult(assistant, relatedSkillIds, inputWasDegraded);
                 break;
             }
 
-            foreach (var toolCall in assistant.ToolCalls)
+            if (skillReadWindowSize <= 0)
             {
-                var result = string.Equals(toolCall.Function.Name, "skill_read", StringComparison.OrdinalIgnoreCase)
-                    ? await executor.ExecuteAsync(toolCall, ct)
-                    : "[blocked] Skill organization mode allows only skill_read. Return structured JSON actions for create/update/delete/supersede; the host applies changes after validation.";
-                messages.Add(ChatMessage.Tool(toolCall.Id, result));
+                baseMessages = baseMessages.Concat(new[] { ChatMessage.User("The skill_read window is 0 for this degraded batch. Return final create/skip JSON now; do not update/delete existing skills.") }).ToList();
+                continue;
+            }
+
+            var readRequests = ExtractSkillReadRequests(assistant.ToolCalls)
+                .Where(skillId => !retainedSkills.ContainsKey(skillId) && !unrelatedSkillIds.Contains(skillId))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(skillReadWindowSize)
+                .ToList();
+            if (readRequests.Count == 0)
+            {
+                baseMessages = baseMessages.Concat(new[] { ChatMessage.User("No new skill_read candidate was accepted for this round. Return final organization JSON or request a different unread skill id.") }).ToList();
+                continue;
+            }
+
+            List<SkillReadContext> readContexts;
+            try
+            {
+                readContexts = await ExecuteSkillReadWindowAsync(executor, readRequests, ct);
+                var decisionMessages = BuildSkillReadDecisionMessages(baseMessages, retainedSkills, unrelatedSkillIds, readContexts);
+                var decision = await SendSkillOrganizationMessageAsync(llm, decisionMessages, new List<ToolDefinition>(), job, "Skill read relevance decision", ct, readContext: true);
+                var decisionResult = await ParseSkillReadRoundDecisionAsync(llm, decisionMessages, decision, job, ct);
+                ApplySkillReadDecisions(readContexts, decisionResult, retainedSkills, unrelatedSkillIds, relatedSkillIds);
+            }
+            catch (Exception ex) when (IsContextPayloadError(ex))
+            {
+                throw new SkillOrganizationReadContextTooLargeException("skill_read window context exceeded provider limits: " + ex.Message, ex);
             }
         }
 
         if (last == null)
             throw new InvalidOperationException("Skill organization subagent did not respond.");
 
-        messages.Add(ChatMessage.User("Stop using tools. Based on the session evidence and the relevant skills you read with skill_read, return the required skill organization JSON only. Do not include Markdown fences or prose outside the JSON."));
-        last = await llm.SendAsync(messages, new List<ToolDefinition>(), _ => { }, ct,
-            async (attempt, delay, error, token) =>
-            {
-                job.Stage = $"Skill organization report generation retrying ({attempt}); next probe in {delay.TotalSeconds:F0}s.";
-                await Task.CompletedTask;
-            },
-            enableThinking: false);
+        var finalMessages = BuildSkillOrganizationRoundMessages(baseMessages, retainedSkills, unrelatedSkillIds, skillReadWindowSize);
+        finalMessages.Add(ChatMessage.User("Stop using tools. Based on the session evidence and the related skills retained by skill_read decisions, return the required skill organization JSON only. Do not include Markdown fences or prose outside the JSON."));
+        last = await SendSkillOrganizationMessageAsync(llm, finalMessages, new List<ToolDefinition>(), job, "Skill organization report generation", ct);
 
-        return last;
+        return new SkillOrganizationRunResult(last, relatedSkillIds, inputWasDegraded);
+    }
+
+    private static async Task<ChatMessage> SendSkillOrganizationMessageAsync(
+        LlmClient llm,
+        List<ChatMessage> messages,
+        List<ToolDefinition> tools,
+        SkillJob job,
+        string stage,
+        CancellationToken ct,
+        bool readContext = false)
+    {
+        try
+        {
+            return await llm.SendAsync(messages, tools, _ => { }, ct,
+                async (attempt, delay, error, token) =>
+                {
+                    job.Stage = $"{stage} retrying ({attempt}); next probe in {delay.TotalSeconds:F0}s.";
+                    await Task.CompletedTask;
+                },
+                enableThinking: false);
+        }
+        catch (Exception ex) when (IsContextPayloadError(ex))
+        {
+            if (readContext)
+                throw new SkillOrganizationReadContextTooLargeException("skill_read context was too large.", ex);
+            throw new SkillOrganizationContextTooLargeException("skill organization context was too large.", ex);
+        }
+    }
+
+    private static List<ChatMessage> BuildSkillOrganizationRoundMessages(
+        List<ChatMessage> baseMessages,
+        Dictionary<string, SkillReadContext> retainedSkills,
+        HashSet<string> unrelatedSkillIds,
+        int skillReadWindowSize)
+    {
+        var messages = baseMessages.ToList();
+        var sb = new StringBuilder();
+        sb.AppendLine("## Skill Read Round State");
+        sb.AppendLine($"Current skill_read window size: {skillReadWindowSize}.");
+        sb.AppendLine("Only retained related skills below are approved for update/delete/supersede in final JSON.");
+        if (retainedSkills.Count == 0)
+        {
+            sb.AppendLine("Retained related skills: none.");
+        }
+        else
+        {
+            sb.AppendLine("### Retained Related Skills");
+            foreach (var skill in retainedSkills.Values)
+            {
+                sb.AppendLine($"#### {skill.SkillId}");
+                sb.AppendLine(Trim(skill.Content, MaxRetainedSkillReadChars));
+            }
+        }
+
+        if (unrelatedSkillIds.Count > 0)
+            sb.AppendLine("Discarded unrelated skill IDs: " + string.Join(", ", unrelatedSkillIds.OrderBy(id => id, StringComparer.OrdinalIgnoreCase)));
+
+        messages.Add(ChatMessage.User(sb.ToString()));
+        return messages;
+    }
+
+    private static List<string> ExtractSkillReadRequests(IEnumerable<ToolCall> toolCalls)
+    {
+        var ids = new List<string>();
+        foreach (var call in toolCalls)
+        {
+            if (!string.Equals(call.Function.Name, "skill_read", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            try
+            {
+                var args = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(call.Function.Arguments, JsonOptions) ?? new();
+                if (args.TryGetValue("skill_id", out var idElement) && idElement.ValueKind == JsonValueKind.String)
+                {
+                    var id = idElement.GetString();
+                    if (!string.IsNullOrWhiteSpace(id))
+                        ids.Add(id.Trim());
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        return ids;
+    }
+
+    private static async Task<List<SkillReadContext>> ExecuteSkillReadWindowAsync(ToolExecutor executor, List<string> skillIds, CancellationToken ct)
+    {
+        var contexts = new List<SkillReadContext>();
+        foreach (var skillId in skillIds)
+        {
+            var toolCall = new ToolCall
+            {
+                Id = "skill_read_" + Guid.NewGuid().ToString("N")[..8],
+                Type = "function",
+                Function = new ToolFunction
+                {
+                    Name = "skill_read",
+                    Arguments = JsonSerializer.Serialize(new { skill_id = skillId }, JsonOptions)
+                }
+            };
+            var content = await executor.ExecuteAsync(toolCall, ct);
+            contexts.Add(new SkillReadContext(skillId, content));
+        }
+
+        return contexts;
+    }
+
+    private static List<ChatMessage> BuildSkillReadDecisionMessages(
+        List<ChatMessage> baseMessages,
+        Dictionary<string, SkillReadContext> retainedSkills,
+        HashSet<string> unrelatedSkillIds,
+        List<SkillReadContext> readContexts)
+    {
+        var messages = BuildSkillOrganizationRoundMessages(baseMessages, retainedSkills, unrelatedSkillIds, readContexts.Count);
+        var sb = new StringBuilder();
+        sb.AppendLine("## Current skill_read Window");
+        sb.AppendLine("Decide immediately whether each skill in this window is strongly related to the pending evidence.");
+        foreach (var context in readContexts)
+        {
+            sb.AppendLine($"### skill_id={context.SkillId}");
+            sb.AppendLine(Trim(context.Content, MaxRetainedSkillReadChars));
+        }
+        sb.AppendLine();
+        sb.AppendLine("Return JSON only with this shape:");
+        sb.AppendLine("{");
+        sb.AppendLine("  \"skill_read_decisions\": [");
+        sb.AppendLine("    { \"id\": \"skill id\", \"decision\": \"related|unrelated\", \"reason\": \"short evidence-bound reason\" }");
+        sb.AppendLine("  ],");
+        sb.AppendLine("  \"summary\": \"what was retained or discarded\"");
+        sb.AppendLine("}");
+        sb.AppendLine("Do not return final skill create/update/delete JSON in this relevance-decision response.");
+        messages.Add(ChatMessage.User(sb.ToString()));
+        return messages;
+    }
+
+    private static async Task<SkillReadRoundResult> ParseSkillReadRoundDecisionAsync(
+        LlmClient llm,
+        List<ChatMessage> decisionMessages,
+        ChatMessage decision,
+        SkillJob job,
+        CancellationToken ct)
+    {
+        var parsed = DeserializeJsonFromResponse<SkillReadRoundResult>(decision.Content);
+        if (parsed != null && parsed.SkillReadDecisions != null)
+            return parsed;
+
+        var repairMessages = decisionMessages.ToList();
+        repairMessages.Add(decision);
+        repairMessages.Add(ChatMessage.User("Return the required skill_read_decisions JSON only. Do not include final skill organization actions in this response."));
+        var repaired = await SendSkillOrganizationMessageAsync(llm, repairMessages, new List<ToolDefinition>(), job, "Skill read relevance repair", ct, readContext: true);
+        parsed = DeserializeJsonFromResponse<SkillReadRoundResult>(repaired.Content);
+        return parsed ?? new SkillReadRoundResult { SkillReadDecisions = new List<SkillReadDecision>() };
+    }
+
+    private static void ApplySkillReadDecisions(
+        List<SkillReadContext> readContexts,
+        SkillReadRoundResult decisionResult,
+        Dictionary<string, SkillReadContext> retainedSkills,
+        HashSet<string> unrelatedSkillIds,
+        HashSet<string> relatedSkillIds)
+    {
+        var decisions = (decisionResult.SkillReadDecisions ?? new List<SkillReadDecision>())
+            .Where(item => !string.IsNullOrWhiteSpace(item.Id))
+            .GroupBy(item => item.Id!, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.Last(), StringComparer.OrdinalIgnoreCase);
+
+        foreach (var context in readContexts)
+        {
+            if (!decisions.TryGetValue(context.SkillId, out var decision))
+            {
+                unrelatedSkillIds.Add(context.SkillId);
+                continue;
+            }
+
+            var normalized = (decision.Decision ?? "").Trim().ToLowerInvariant();
+            if (normalized == "related")
+            {
+                retainedSkills[context.SkillId] = context;
+                relatedSkillIds.Add(context.SkillId);
+                unrelatedSkillIds.Remove(context.SkillId);
+            }
+            else
+            {
+                retainedSkills.Remove(context.SkillId);
+                relatedSkillIds.Remove(context.SkillId);
+                unrelatedSkillIds.Add(context.SkillId);
+            }
+        }
     }
 
     private static bool HasStructuredOrganizationJson(string? content)
@@ -1133,6 +1342,310 @@ public sealed class SkillMaintenanceService
         return IsReadableLearningTextFile(file);
     }
 
+    private async Task<SkillOrganizationBatchOutcome> ProcessNextSkillOrganizationBatchAsync(
+        SkillJob job,
+        SkillService skillService,
+        List<SkillSessionWorkItem> workItems,
+        SkillOrganizationTuning tuning,
+        GlobalBookmarkState globalState,
+        int step,
+        int estimatedSteps,
+        CancellationToken ct)
+    {
+        var localTuning = tuning.Clone();
+        var inputWasDegraded = false;
+        var lastFailure = string.Empty;
+
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+            var batch = BuildNextSkillSessionBatches(workItems, localTuning);
+            if (batch.Count == 0)
+                throw new InvalidOperationException("No skill organization batch could be built.");
+
+            var batchKey = BuildSkillBatchKey(batch);
+            var failureCount = GetSkillBatchFailureCount(globalState, batchKey);
+            if (failureCount > MaxSkillBatchFailuresBeforeSkip)
+                return BuildSkippedSkillOrganizationOutcome(batch, localTuning, inputWasDegraded, batchKey, lastFailure, failureCount);
+
+            try
+            {
+                var existingSkills = skillService.List(job.Agent).Skills;
+                var stepMessageCount = batch.Sum(item => item.Messages.Count);
+                job.Stage = $"Step {step}/{estimatedSteps}: analyzing {batch.Count} session batch(es), {stepMessageCount} message(s), tuning={localTuning.Describe()}.";
+                job.Progress = Math.Min(94, (int)((step - 1) * 90.0 / estimatedSteps) + 5);
+
+                var messages = BuildOrganizationMessages(job.Agent, existingSkills, batch, localTuning.SkillReadWindowSize);
+                var runResult = await RunSkillOrganizationSubagentAsync(
+                    job.Agent,
+                    messages,
+                    job,
+                    $"Skill extraction subagent analyzing (step {step}/{estimatedSteps}, {localTuning.Describe()})...",
+                    40,
+                    localTuning.SkillReadWindowSize,
+                    ct);
+
+                job.Stage = $"Parsing skill extraction result (step {step}/{estimatedSteps})...";
+                job.Progress = Math.Min(96, (int)((step - 0.5) * 90.0 / estimatedSteps) + 5);
+
+                var result = DeserializeJsonFromResponse<SkillOrganizationResult>(runResult.Response.Content);
+                if (result == null)
+                    throw new SkillOrganizationResultRejectedException($"Skill organization subagent did not return structured JSON at step {step}/{estimatedSteps}.");
+
+                result = ConstrainOrganizationResultToRelatedSkills(result, runResult.RelatedSkillIds);
+                var applied = ApplyOrganizationResult(job.Agent, result, skillService);
+                ClearSkillBatchFailure(globalState, batchKey);
+                return new SkillOrganizationBatchOutcome(batch, result, applied, inputWasDegraded || runResult.InputWasDegraded, localTuning);
+            }
+            catch (Exception ex) when (IsRecoverableSkillOrganizationFailure(ex))
+            {
+                lastFailure = ex.Message;
+                failureCount = IncrementSkillBatchFailure(globalState, batchKey);
+                if (failureCount > MaxSkillBatchFailuresBeforeSkip)
+                    return BuildSkippedSkillOrganizationOutcome(batch, localTuning, true, batchKey, lastFailure, failureCount);
+
+                if (ReduceSkillOrganizationTuning(localTuning, batch, ex))
+                {
+                    inputWasDegraded = true;
+                    job.Stage = $"Skill organization batch rejected; retrying with smaller scope: {localTuning.Describe()} ({lastFailure})";
+                    continue;
+                }
+
+                inputWasDegraded = true;
+                job.Stage = $"Skill organization batch rejected at minimum scope; retrying before skip ({failureCount}/{MaxSkillBatchFailuresBeforeSkip + 1}). {lastFailure}";
+            }
+        }
+    }
+
+    private static SkillOrganizationBatchOutcome BuildSkippedSkillOrganizationOutcome(
+        List<SkillSessionBatch> batch,
+        SkillOrganizationTuning tuning,
+        bool inputWasDegraded,
+        string batchKey,
+        string lastFailure,
+        int failureCount)
+    {
+        var first = batch.First();
+        var messageCount = batch.Sum(item => item.Messages.Count);
+        var reason = string.IsNullOrWhiteSpace(lastFailure)
+            ? "The batch had already exceeded the recoverable failure threshold."
+            : lastFailure;
+        var result = new SkillOrganizationResult
+        {
+            Summary = $"Skipped skill evidence batch after {failureCount} recoverable failure(s): {reason}",
+            Skills = new List<SkillOrganizationItem>
+            {
+                new()
+                {
+                    Action = "skip",
+                    Name = "Skipped skill evidence batch",
+                    Description = "Poison-batch isolation skipped this evidence range so later skills can still be discovered.",
+                    Content = string.Empty,
+                    Evidence = new List<string>
+                    {
+                        $"batch_key={batchKey}",
+                        $"session={first.SessionId}",
+                        $"messages={first.StartIndex + 1}-{first.StartIndex + messageCount}",
+                        $"reason={reason}"
+                    }
+                }
+            }
+        };
+        var applied = $"skipped poison batch {batchKey}; session={first.SessionId}; messages={first.StartIndex + 1}-{first.StartIndex + messageCount}; failures={failureCount}; reason={reason}";
+        return new SkillOrganizationBatchOutcome(batch, result, applied, inputWasDegraded: true, tuning);
+    }
+
+    private static SkillOrganizationTuning GetSkillOrganizationTuning(GlobalBookmarkState state)
+        => new(
+            ClampSkillBatchSize(state.SkillOrgSessionMessageBatchHint ?? DefaultSkillSessionMessagesPerBatch),
+            ClampSkillReadWindow(state.SkillOrgReadWindowHint ?? DefaultSkillReadWindowSize));
+
+    private static void UpdateSkillOrganizationTuningAfterOutcome(GlobalBookmarkState state, SkillOrganizationTuning tuning, SkillOrganizationBatchOutcome outcome)
+    {
+        var batchMessageCount = outcome.Batch.Sum(item => item.Messages.Count);
+        if (batchMessageCount > 0)
+        {
+            tuning.SessionMessageBatchSize = outcome.InputWasDegraded
+                ? AverageSkillBatchSize(DefaultSkillSessionMessagesPerBatch, batchMessageCount)
+                : RecoverSkillBatchSize(tuning.SessionMessageBatchSize, DefaultSkillSessionMessagesPerBatch);
+            state.SkillOrgSessionMessageBatchHint = tuning.SessionMessageBatchSize;
+        }
+
+        tuning.SkillReadWindowSize = outcome.InputWasDegraded
+            ? AverageSkillReadWindow(DefaultSkillReadWindowSize, outcome.Tuning.SkillReadWindowSize)
+            : RecoverSkillReadWindow(tuning.SkillReadWindowSize, DefaultSkillReadWindowSize);
+        state.SkillOrgReadWindowHint = tuning.SkillReadWindowSize;
+    }
+
+    private static bool ReduceSkillOrganizationTuning(SkillOrganizationTuning tuning, List<SkillSessionBatch> batch, Exception ex)
+    {
+        var preferReadWindow = ex is SkillOrganizationReadContextTooLargeException;
+        if (preferReadWindow && tuning.SkillReadWindowSize > 0)
+        {
+            tuning.SkillReadWindowSize--;
+            return true;
+        }
+
+        var messageCount = batch.Sum(item => item.Messages.Count);
+        if (messageCount > 1 && tuning.SessionMessageBatchSize > 1)
+        {
+            tuning.SessionMessageBatchSize = Math.Max(1, Math.Min(tuning.SessionMessageBatchSize - 1, (int)Math.Ceiling(messageCount / 2.0)));
+            return true;
+        }
+
+        if (tuning.SkillReadWindowSize > 0)
+        {
+            tuning.SkillReadWindowSize--;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static int ClampSkillBatchSize(int value)
+        => Math.Clamp(value, 1, DefaultSkillSessionMessagesPerBatch);
+
+    private static int AverageSkillBatchSize(int defaultValue, int successfulValue)
+        => Math.Clamp((defaultValue + Math.Max(1, successfulValue)) / 2, 1, defaultValue);
+
+    private static int RecoverSkillBatchSize(int currentValue, int defaultValue)
+        => Math.Clamp((Math.Max(1, currentValue) + defaultValue + 1) / 2, 1, defaultValue);
+
+    private static int ClampSkillReadWindow(int value)
+        => Math.Clamp(value, 0, DefaultSkillReadWindowSize);
+
+    private static int AverageSkillReadWindow(int defaultValue, int successfulValue)
+        => Math.Clamp((defaultValue + Math.Max(0, successfulValue)) / 2, 0, defaultValue);
+
+    private static int RecoverSkillReadWindow(int currentValue, int defaultValue)
+        => Math.Clamp((Math.Max(0, currentValue) + defaultValue + 1) / 2, 0, defaultValue);
+
+    private static SkillOrganizationResult ConstrainOrganizationResultToRelatedSkills(SkillOrganizationResult result, IReadOnlySet<string> relatedSkillIds)
+    {
+        var constrained = new SkillOrganizationResult
+        {
+            Summary = result.Summary,
+            Skills = new List<SkillOrganizationItem>()
+        };
+
+        foreach (var item in result.Skills ?? new List<SkillOrganizationItem>())
+        {
+            var action = (item.Action ?? "").Trim().ToLowerInvariant();
+            if ((action == "update" || action == "delete") && !IsRelatedSkillId(item.Id, relatedSkillIds))
+            {
+                constrained.Skills.Add(new SkillOrganizationItem
+                {
+                    Action = "skip",
+                    Name = string.IsNullOrWhiteSpace(item.Name) ? "Unauthorized existing-skill action skipped" : item.Name,
+                    Description = "Existing skill update/delete was skipped because the skill was not retained as related in the skill_read rounds.",
+                    Evidence = new List<string> { $"action={action}", $"id={item.Id ?? "(missing)"}" }
+                });
+                continue;
+            }
+
+            if (item.SupersededIds != null)
+                item.SupersededIds = item.SupersededIds.Where(id => IsRelatedSkillId(id, relatedSkillIds)).ToList();
+            constrained.Skills.Add(item);
+        }
+
+        return constrained;
+    }
+
+    private static bool IsRelatedSkillId(string? skillId, IReadOnlySet<string> relatedSkillIds)
+        => !string.IsNullOrWhiteSpace(skillId) && relatedSkillIds.Contains(skillId);
+
+    private static bool IsRecoverableSkillOrganizationFailure(Exception ex)
+        => ex is SkillOrganizationContextTooLargeException
+            or SkillOrganizationReadContextTooLargeException
+            or SkillOrganizationResultRejectedException
+            || IsContextPayloadError(ex);
+
+    private static bool IsContextPayloadError(Exception ex)
+    {
+        var message = ex.ToString();
+        var hasSizeSignal =
+            message.Contains("context", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("token", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("too large", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("too long", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("maximum", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("length", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("payload", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("request body", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("input", StringComparison.OrdinalIgnoreCase);
+
+        if (!hasSizeSignal)
+            return false;
+
+        if (ex is HttpRequestException http && http.StatusCode.HasValue)
+        {
+            var status = (int)http.StatusCode.Value;
+            return status == 400 || status == 413 || status == 422;
+        }
+
+        return message.Contains("LLM API error: 400", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("LLM API error: 413", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("invalid_argument", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static int GetSkillBatchFailureCount(GlobalBookmarkState state, string batchKey)
+        => state.SkillOrgBatchFailures != null && state.SkillOrgBatchFailures.TryGetValue(batchKey, out var count) ? count : 0;
+
+    private static int IncrementSkillBatchFailure(GlobalBookmarkState state, string batchKey)
+    {
+        state.SkillOrgBatchFailures ??= new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        state.SkillOrgBatchFailures.TryGetValue(batchKey, out var count);
+        count++;
+        state.SkillOrgBatchFailures[batchKey] = count;
+        return count;
+    }
+
+    private static void ClearSkillBatchFailure(GlobalBookmarkState state, string batchKey)
+    {
+        if (state.SkillOrgBatchFailures == null)
+            return;
+        state.SkillOrgBatchFailures.Remove(batchKey);
+        if (state.SkillOrgBatchFailures.Count == 0)
+            state.SkillOrgBatchFailures = null;
+    }
+
+    private static void PruneSkillBatchFailureState(GlobalBookmarkState state)
+    {
+        if (state.SkillOrgBatchFailures == null || state.SkillOrgBatchFailures.Count <= 200)
+            return;
+
+        state.SkillOrgBatchFailures = state.SkillOrgBatchFailures
+            .OrderByDescending(item => item.Value)
+            .ThenBy(item => item.Key, StringComparer.OrdinalIgnoreCase)
+            .Take(100)
+            .ToDictionary(item => item.Key, item => item.Value, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static string BuildSkillBatchKey(List<SkillSessionBatch> batch)
+    {
+        var sb = new StringBuilder();
+        foreach (var session in batch)
+        {
+            sb.Append(session.SessionId).Append(':').Append(session.StartIndex).Append(':').Append(session.Messages.Count).Append('|');
+            foreach (var message in session.Messages)
+            {
+                sb.Append(message.Role).Append(':').Append(message.Timestamp?.ToUnixTimeMilliseconds()).Append(':');
+                if (message.ToolCalls != null)
+                {
+                    foreach (var call in message.ToolCalls)
+                        sb.Append(call.Function.Name).Append('(').Append(call.Function.Arguments).Append(')');
+                }
+                if (!string.Equals(message.Role, "tool", StringComparison.OrdinalIgnoreCase))
+                    sb.Append(message.Content);
+                sb.Append('\n');
+            }
+        }
+
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString())))[..16].ToLowerInvariant();
+        var first = batch.First();
+        return $"{first.SessionId}:{first.StartIndex}:{batch.Sum(item => item.Messages.Count)}:{hash}";
+    }
+
     private List<SessionContext> CollectPendingSkillSessions(string agent)
     {
         var sessions = new List<SessionContext>();
@@ -1207,34 +1720,64 @@ public sealed class SkillMaintenanceService
             : (new List<ChatMessage>(), messages.Count);
     }
 
-    private static List<SkillSessionBatch> BuildSkillSessionBatches(List<SessionContext> sessions)
+    private static List<SkillSessionWorkItem> BuildSkillSessionWorkItems(List<SessionContext> sessions)
+        => sessions
+            .Where(session => session.Messages.Count > 0)
+            .Select(session => new SkillSessionWorkItem(session))
+            .ToList();
+
+    private static List<SkillSessionBatch> BuildNextSkillSessionBatches(List<SkillSessionWorkItem> workItems, SkillOrganizationTuning tuning)
     {
         var batches = new List<SkillSessionBatch>();
-        foreach (var session in sessions)
+        foreach (var work in workItems.Where(item => !item.IsComplete).Take(MaxSkillSessionsPerStep))
         {
-            for (var offset = 0; offset < session.Messages.Count; offset += MaxSkillSessionMessagesPerBatch)
-            {
-                var messages = session.Messages
-                    .Skip(offset)
-                    .Take(MaxSkillSessionMessagesPerBatch)
-                    .ToList();
-                if (messages.Count == 0)
-                    continue;
+            var size = Math.Min(tuning.SessionMessageBatchSize, work.RemainingCount);
+            var messages = work.Session.Messages
+                .Skip(work.Offset)
+                .Take(size)
+                .ToList();
+            if (messages.Count == 0)
+                continue;
 
-                batches.Add(new SkillSessionBatch
-                {
-                    SessionId = session.SessionId,
-                    LastActivity = session.LastActivity,
-                    TotalMessages = session.TotalMessages,
-                    StartIndex = session.StartIndex + offset,
-                    Messages = messages,
-                    Bookmark = session.Bookmark,
-                    CompletesSession = offset + messages.Count >= session.Messages.Count
-                });
-            }
+            batches.Add(new SkillSessionBatch
+            {
+                SessionId = work.Session.SessionId,
+                LastActivity = work.Session.LastActivity,
+                TotalMessages = work.Session.TotalMessages,
+                StartIndex = work.Session.StartIndex + work.Offset,
+                Messages = messages,
+                Bookmark = work.Session.Bookmark,
+                CompletesSession = work.Offset + messages.Count >= work.Session.Messages.Count
+            });
         }
 
         return batches;
+    }
+
+    private static void AdvanceSkillSessionWorkItems(List<SkillSessionWorkItem> workItems, List<SkillSessionBatch> batches)
+    {
+        foreach (var batch in batches)
+        {
+            var work = workItems.FirstOrDefault(item => string.Equals(item.Session.SessionId, batch.SessionId, StringComparison.OrdinalIgnoreCase));
+            if (work != null)
+                work.Offset = Math.Min(work.Session.Messages.Count, work.Offset + batch.Messages.Count);
+        }
+    }
+
+    private void UpdateCompletedSkillSessionBookmarks(string agent, List<SkillSessionWorkItem> workItems)
+    {
+        foreach (var work in workItems.Where(item => item.IsComplete).ToList())
+        {
+            if (work.Session.Bookmark != null)
+                _bookmarks.UpdateSkillSessionBookmark(agent, work.Session.Bookmark);
+            workItems.Remove(work);
+        }
+    }
+
+    private static int EstimateSkillOrganizationSteps(List<SkillSessionWorkItem> workItems, SkillOrganizationTuning tuning)
+    {
+        var batchSize = Math.Max(1, tuning.SessionMessageBatchSize);
+        return workItems.Sum(item => (int)Math.Ceiling(item.RemainingCount / (double)batchSize));
     }
 
     private static bool IsAfter(DateTimeOffset left, DateTimeOffset right)
@@ -1244,7 +1787,7 @@ public sealed class SkillMaintenanceService
         return left.ToUniversalTime() > right.ToUniversalTime();
     }
 
-    private static List<ChatMessage> BuildOrganizationMessages(string agent, List<SkillSummary> existingSkills, List<SkillSessionBatch> sessions)
+    private static List<ChatMessage> BuildOrganizationMessages(string agent, List<SkillSummary> existingSkills, List<SkillSessionBatch> sessions, int skillReadWindowSize)
     {
         var system = new StringBuilder();
         system.AppendLine("# Skill Extraction Subagent");
@@ -1257,7 +1800,10 @@ public sealed class SkillMaintenanceService
         system.AppendLine("Never create skills for private-data access, credential handling, cookie value extraction, authorization-file use, Matdance source modification, runtime-state editing, queue manipulation, or any workflow whose safety depends on exposing secrets.");
         system.AppendLine("Functional reusable assets are the priority: exact commands, scripts, package layouts, browser automation setup, tool arguments, validation steps, failure modes, and fastest known execution path. Guidance-only management notes are allowed only when no concrete reusable operation exists.");
         system.AppendLine("Look below the surface. If a conversation says to browse a forum thread, preserve not only the human-facing steps, but also the most efficient way to run it: browser automation strategy, selectors or navigation constraints if present, batching/caching, required tools, and expected outputs.");
-        system.AppendLine("You receive only the existing skill index, not full skill manuals. First use the index to identify plausibly related skills, then call `skill_read` only for skills that may overlap, conflict, or accept the new workflow. Do not read unrelated skills just to fill context.");
+        system.AppendLine("You receive only the existing skill index, not full skill manuals. First use the index to identify plausibly related skills.");
+        system.AppendLine($"Skill read window: the host may expose at most {skillReadWindowSize} skill_read result(s) per round. After each read window you must immediately decide whether every read skill is `related` or `unrelated`; unrelated skill content is discarded before the next round.");
+        system.AppendLine("Only skills retained as `related` by the read-window decision process are approved for update, delete, or supersede actions. If no related skill has been retained, create a new skill or skip; do not update/delete existing skills from index-only knowledge.");
+        system.AppendLine("When the read window is 0, you have no skill_read budget in this batch. Do not request skill_read; create a clearly independent skill or skip.");
         system.AppendLine("Prefer updating or merging into an existing skill when the new knowledge clearly belongs there. Create a new skill only when it is independently reusable.");
         system.AppendLine("Merge skills only when all three dimensions are highly aligned: same platform family, same operating direction, and same practical scope. The merged skill must remain readable as one coherent package and must not lose concrete steps, code, selectors, commands, verification, failure modes, or tool arguments.");
         system.AppendLine("Good merge examples: Xiaohongshu search plus Xiaohongshu crawl; Windows control of Soda Music plus Windows control of QQ Music; Windows music-app control plus Windows video-app playback control when both fit a coherent Windows audio/video app control skill.");
@@ -1281,7 +1827,7 @@ public sealed class SkillMaintenanceService
         system.AppendLine();
         system.AppendLine("Skill content must be actionable and self-contained. Include triggers, prerequisites, exact run procedure, reusable resources, constraints, verification, examples, and when not to use it.");
         system.AppendLine("If a skill requires a script/program/extension/template/config, include it in `resource_files` and reference it from the skill content with a skill-local relative path such as `./scripts/name.py`. A skill that points at a missing helper file is invalid.");
-        system.AppendLine("The host provided complete session messages, including tool calls and tool results. Use those facts directly; do not invent missing commands or package names.");
+        system.AppendLine("The host provides session messages plus tool-call names and arguments. Raw tool results are intentionally omitted from skill extraction context; do not invent missing outputs or treat an unobserved result as proof.");
         system.AppendLine("The host will apply returned create/update/delete actions. Do not call edit/delete tools directly.");
 
         var context = new StringBuilder();
@@ -1315,6 +1861,7 @@ public sealed class SkillMaintenanceService
 
     private static void AppendFullSkillMessage(StringBuilder context, int index, ChatMessage message)
     {
+        var isToolResult = string.Equals(message.Role, "tool", StringComparison.OrdinalIgnoreCase);
         var payload = new
         {
             index,
@@ -1332,7 +1879,7 @@ public sealed class SkillMaintenanceService
                     arguments = Trim(call.Function.Arguments, MaxSkillToolArgumentsChars)
                 }
             }).ToList(),
-            content = Trim(message.Content, MaxSkillMessageContentChars)
+            content = isToolResult ? "[tool result omitted from skill extraction context]" : Trim(message.Content, MaxSkillMessageContentChars)
         };
         context.AppendLine(JsonSerializer.Serialize(payload, JsonOptions));
     }
@@ -2455,6 +3002,124 @@ internal sealed class SkillSessionBatch
     public List<ChatMessage> Messages { get; set; } = new();
     public SessionBookmark? Bookmark { get; set; }
     public bool CompletesSession { get; set; }
+}
+
+internal sealed class SkillSessionWorkItem
+{
+    public SkillSessionWorkItem(SessionContext session)
+    {
+        Session = session;
+    }
+
+    public SessionContext Session { get; }
+    public int Offset { get; set; }
+    public int RemainingCount => Math.Max(0, Session.Messages.Count - Offset);
+    public bool IsComplete => Offset >= Session.Messages.Count;
+}
+
+internal sealed class SkillOrganizationTuning
+{
+    public SkillOrganizationTuning(int sessionMessageBatchSize, int skillReadWindowSize)
+    {
+        SessionMessageBatchSize = Math.Max(1, sessionMessageBatchSize);
+        SkillReadWindowSize = Math.Clamp(skillReadWindowSize, 0, 2);
+    }
+
+    public int SessionMessageBatchSize { get; set; }
+    public int SkillReadWindowSize { get; set; }
+    public SkillOrganizationTuning Clone() => new(SessionMessageBatchSize, SkillReadWindowSize);
+    public string Describe() => $"session_messages={SessionMessageBatchSize}, skill_read_window={SkillReadWindowSize}";
+}
+
+internal sealed class SkillOrganizationBatchOutcome
+{
+    public SkillOrganizationBatchOutcome(
+        List<SkillSessionBatch> batch,
+        SkillOrganizationResult result,
+        string applied,
+        bool inputWasDegraded,
+        SkillOrganizationTuning tuning)
+    {
+        Batch = batch;
+        Result = result;
+        Applied = applied;
+        InputWasDegraded = inputWasDegraded;
+        Tuning = tuning;
+    }
+
+    public List<SkillSessionBatch> Batch { get; }
+    public SkillOrganizationResult Result { get; }
+    public string Applied { get; }
+    public bool InputWasDegraded { get; }
+    public SkillOrganizationTuning Tuning { get; }
+}
+
+internal sealed class SkillOrganizationRunResult
+{
+    public SkillOrganizationRunResult(ChatMessage response, HashSet<string> relatedSkillIds, bool inputWasDegraded)
+    {
+        Response = response;
+        RelatedSkillIds = new HashSet<string>(relatedSkillIds, StringComparer.OrdinalIgnoreCase);
+        InputWasDegraded = inputWasDegraded;
+    }
+
+    public ChatMessage Response { get; }
+    public HashSet<string> RelatedSkillIds { get; }
+    public bool InputWasDegraded { get; }
+}
+
+internal sealed class SkillReadContext
+{
+    public SkillReadContext(string skillId, string content)
+    {
+        SkillId = skillId;
+        Content = content;
+    }
+
+    public string SkillId { get; }
+    public string Content { get; }
+}
+
+internal sealed class SkillReadRoundResult
+{
+    [JsonPropertyName("skill_read_decisions")]
+    public List<SkillReadDecision>? SkillReadDecisions { get; set; }
+
+    [JsonPropertyName("summary")]
+    public string? Summary { get; set; }
+}
+
+internal sealed class SkillReadDecision
+{
+    [JsonPropertyName("id")]
+    public string? Id { get; set; }
+
+    [JsonPropertyName("decision")]
+    public string? Decision { get; set; }
+
+    [JsonPropertyName("reason")]
+    public string? Reason { get; set; }
+}
+
+internal sealed class SkillOrganizationContextTooLargeException : Exception
+{
+    public SkillOrganizationContextTooLargeException(string message, Exception? inner = null) : base(message, inner)
+    {
+    }
+}
+
+internal sealed class SkillOrganizationReadContextTooLargeException : Exception
+{
+    public SkillOrganizationReadContextTooLargeException(string message, Exception? inner = null) : base(message, inner)
+    {
+    }
+}
+
+internal sealed class SkillOrganizationResultRejectedException : Exception
+{
+    public SkillOrganizationResultRejectedException(string message, Exception? inner = null) : base(message, inner)
+    {
+    }
 }
 
 internal sealed class SkillValidationResult

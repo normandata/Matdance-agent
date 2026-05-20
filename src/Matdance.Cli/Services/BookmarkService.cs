@@ -434,6 +434,18 @@ public class GlobalBookmarkState
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? MemoryOrgTaskRunBatchHint { get; set; }
 
+    [JsonPropertyName("skill_org_session_message_batch_hint")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? SkillOrgSessionMessageBatchHint { get; set; }
+
+    [JsonPropertyName("skill_org_read_window_hint")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? SkillOrgReadWindowHint { get; set; }
+
+    [JsonPropertyName("skill_org_batch_failures")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Dictionary<string, int>? SkillOrgBatchFailures { get; set; }
+
     [JsonPropertyName("updated_at")]
     public DateTimeOffset UpdatedAt { get; set; } = UserTimeZoneService.Now();
 }
