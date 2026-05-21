@@ -2389,20 +2389,11 @@ public sealed class WebServer
         var llm = new LlmClient(config);
         var executor = new ToolExecutor(request.Agent, _path, state, allowInteractiveConfirmation: false, sessionId: request.Session, backgroundWork: _backgroundWork);
         var tools = ToolRegistry.GetAll();
-        // Compress context if needed before building request
-        var mainContextMessages = state.Messages.Where(PromptBuilder.ShouldIncludeInMainContext).ToList();
+        // Build the full request first; compression uses the real request budget.
+        var rawMainContextCount = state.Messages.Count(PromptBuilder.ShouldIncludeInMainContext);
+        var mainContextMessages = BuildMainContextWithCompaction(state, out var baseCompressedCount, out var usedStoredSummary);
         var compressor = new ContextCompressor(config);
-        List<ChatMessage> compressedHistory;
-        if (compressor.ShouldCompress(mainContextMessages))
-        {
-            compressedHistory = await compressor.CompressAsync(mainContextMessages, context.RequestAborted);
-        }
-        else
-        {
-            compressedHistory = mainContextMessages;
-        }
-
-        var requestMessages = PromptBuilder.BuildRequestMessages(request.Agent, _path, config, state, compressedHistory);
+        var requestMessages = PromptBuilder.BuildRequestMessages(request.Agent, _path, config, state, mainContextMessages);
         var privacyRevocationNotice = new SecuritySettingsService().ConsumePrivacyAccessRevokedNotice();
         if (!string.IsNullOrWhiteSpace(privacyRevocationNotice))
         {
@@ -2422,6 +2413,13 @@ public sealed class WebServer
             userMsg = ChatMessage.User(request.Message, request.Attachments.Count > 0 ? request.Attachments : null);
             requestMessages.Add(userMsg);
             data.TotalMessages++;
+        }
+
+        var initialCompression = await compressor.CompressRequestAsync(requestMessages, tools, context.RequestAborted);
+        if (initialCompression.Compressed)
+        {
+            requestMessages = initialCompression.Messages;
+            RecordContextCompaction(state, initialCompression, rawMainContextCount, baseCompressedCount, usedStoredSummary);
         }
 
         var userMsgSaved = request.ContinueFromHostNotice;
@@ -2454,6 +2452,12 @@ public sealed class WebServer
                 }
                 QueueEvent(events.Writer, "phase", new { phase = loop == 1 ? "thinking" : "integrating" });
                 PromptBuilder.UpsertLiveFileLocksSnapshot(requestMessages, state);
+                var budgetResult = await compressor.CompressRequestAsync(requestMessages, tools, context.RequestAborted);
+                if (budgetResult.Compressed)
+                {
+                    requestMessages = budgetResult.Messages;
+                    QueueEvent(events.Writer, "phase", new { phase = "compressing" });
+                }
 
                 var streamed = new StringBuilder();
                 var streamFilter = new LlmResponseGuard.StreamingFilter();
@@ -2470,7 +2474,10 @@ public sealed class WebServer
                     QueueEvent(events.Writer, "chunk", new { text });
                 }
 
-                var assistantMsg = await llm.SendAsync(
+                var sendResult = await SendWithContextRetryAsync(
+                    request.Agent,
+                    config,
+                    llm,
                     requestMessages,
                     tools,
                     chunk => streamFilter.OnChunk(chunk, EmitChunk),
@@ -2482,7 +2489,11 @@ public sealed class WebServer
                             QueueEvent(events.Writer, "thinking", new { text = chunk });
                         }
                     },
+                    onContextRetry: () => QueueEvent(events.Writer, "phase", new { phase = "compressing" }),
                     enableThinking: false);
+                requestMessages = sendResult.Messages;
+                var assistantMsg = sendResult.Message;
+                requestMessages.RemoveAll(ContextCompressor.IsOneShotHandoff);
 
                 var isTransientFailure = LlmResponseGuard.IsTransientAssistantFailure(assistantMsg);
                 if (!isTransientFailure)
@@ -2680,6 +2691,124 @@ public sealed class WebServer
             {
             }
         }
+    }
+
+    private async Task<ContextAwareSendResult> SendWithContextRetryAsync(
+        string agent,
+        AgentConfig config,
+        LlmClient llm,
+        List<ChatMessage> requestMessages,
+        List<ToolDefinition> tools,
+        Action<string> onStreamChunk,
+        CancellationToken ct,
+        Action<string>? onReasoningChunk,
+        Action? onContextRetry,
+        bool enableThinking)
+    {
+        try
+        {
+            var message = await llm.SendAsync(
+                requestMessages,
+                tools,
+                onStreamChunk,
+                ct,
+                onReasoningChunk: onReasoningChunk,
+                enableThinking: enableThinking);
+            return new ContextAwareSendResult(requestMessages, message);
+        }
+        catch (Exception ex) when (LlmClient.IsContextLimitError(ex) && !ct.IsCancellationRequested)
+        {
+            CalibrateContextWindowAfterLimitError(agent, config, requestMessages, tools);
+            onContextRetry?.Invoke();
+            var compressor = new ContextCompressor(config);
+            var compressed = await compressor.CompressRequestAsync(requestMessages, tools, ct, force: true);
+            var retryMessages = compressed.Messages;
+            var message = await llm.SendAsync(
+                retryMessages,
+                tools,
+                onStreamChunk,
+                ct,
+                onReasoningChunk: onReasoningChunk,
+                enableThinking: enableThinking);
+            return new ContextAwareSendResult(retryMessages, message);
+        }
+    }
+
+    private void CalibrateContextWindowAfterLimitError(
+        string agent,
+        AgentConfig config,
+        List<ChatMessage> requestMessages,
+        List<ToolDefinition> tools)
+    {
+        var observed = ContextCompressor.EstimateObservedContextWindowAfterLimitError(config, requestMessages, tools);
+        if (observed >= config.ContextWindow)
+            return;
+
+        config.ContextWindow = observed;
+        try
+        {
+            config.Save(_path.GetAgentConfigJsonPath(agent));
+        }
+        catch
+        {
+        }
+    }
+
+    private sealed record ContextAwareSendResult(List<ChatMessage> Messages, ChatMessage Message);
+
+    private static List<ChatMessage> BuildMainContextWithCompaction(
+        SessionState state,
+        out int baseCompressedCount,
+        out bool usedStoredSummary)
+    {
+        var raw = state.Messages.Where(PromptBuilder.ShouldIncludeInMainContext).ToList();
+        baseCompressedCount = 0;
+        usedStoredSummary = false;
+
+        var compaction = state.ContextCompaction;
+        if (compaction == null || string.IsNullOrWhiteSpace(compaction.Summary))
+            return raw;
+
+        var point = Math.Clamp(compaction.CompressedUntilMessageCount, 0, raw.Count);
+        if (point <= 0)
+            return raw;
+
+        baseCompressedCount = point;
+        usedStoredSummary = true;
+        var result = new List<ChatMessage> { ContextCompressor.SummaryMessage(compaction.Summary) };
+        result.AddRange(raw.Skip(point));
+        return result;
+    }
+
+    private static void RecordContextCompaction(
+        SessionState state,
+        ContextCompressionResult result,
+        int rawMainContextCount,
+        int baseCompressedCount,
+        bool usedStoredSummary)
+    {
+        if (!result.Compressed || string.IsNullOrWhiteSpace(result.SummaryContent))
+            return;
+
+        var covered = result.CompressedSourceMessageCount;
+        if (covered <= 0)
+            return;
+
+        var rawCovered = usedStoredSummary && covered > 0
+            ? baseCompressedCount + Math.Max(0, covered - 1)
+            : covered;
+        rawCovered = Math.Clamp(rawCovered, 0, rawMainContextCount);
+        if (rawCovered <= 0)
+            return;
+
+        state.ContextCompaction = new ContextCompactionInfo
+        {
+            Generation = (state.ContextCompaction?.Generation ?? 0) + 1,
+            CompressedUntilMessageCount = rawCovered,
+            Summary = result.SummaryContent,
+            LastHandoff = result.HandoffContent,
+            CreatedAt = UserTimeZoneService.Now()
+        };
     }
 
     private string GetSessionFile(string agent, string session)

@@ -2,7 +2,7 @@
 
 Language: English | [中文](FULL-DOC.zh-CN.md)
 
-Current version: v1.1.20-hot-fix-2
+Current version: v1.1.21-preview
 
 This file is the complete explanatory document for Matdance. `README.md`, `quickly_start.md`, and the topic documents under `docs/` stay concise so that entry points, commands, and local mechanisms are easy to find. If you want to understand what this system is doing, why it is shaped this way, and which boundaries must not be blurred, read this `FULL-DOC.md`. `FULL-DOC.md` and `FULL-DOC.zh-CN.md` should carry the same complete content; they differ only by language.
 
@@ -10,15 +10,20 @@ Matdance is not a forwarding shell with a chat window wrapped around it. It is a
 
 The problem it tries to solve is direct: let agents keep local state, organize experience, reuse skills, and leave files that a human can inspect at any time. "Continuous learning" here does not mean secretly training model weights, and it is not an agent roleplaying growth inside a chat box. Matdance accumulates Markdown, JSON, indexes, task records, run reports, and validation reports. Only something visible, editable, and movable deserves to be called long-term collaboration.
 
-## v1.1.20-hot-fix-2 Summary
+## v1.1.21-preview Summary
 
-v1.1.20-hot-fix-2 continues the boundary and reliability work from the previous preview releases.
+v1.1.21-preview focuses on graceful context compression for long-running conversations while keeping the reliability fixes from the previous preview releases.
 
 - README was split into a concise entrance, topic documents, and this full document. README no longer carries every explanation.
+- Main conversation context compression now estimates the whole request budget, including system/context messages, conversation messages, and tool schema overhead. When compression is needed, it keeps a compact sidecar summary in the session state instead of rewriting the original transcript.
+- Automatic compression protects the latest three user turns and their assistant/tool follow-up, compresses older history in token-balanced segments, and can split oversized segments before falling back to a local degraded summary. Later successful rounds can recover to larger segments.
+- Compressed retries include a one-shot handoff written for the next agent step. That handoff is injected only for the compressed request and is removed after the model call, so later turns do not keep seeing a stale handoff.
+- Manual `/compact` uses the same compressor path as automatic request-budget compaction and now preserves its summary for later turns.
+- If an upstream model still reports a context-limit error, Matdance recalibrates the configured context window from the observed request estimate, saves the adjusted value, forces compression, and retries the call once.
 - Built-in memory organization and skill organization tasks now use stable English registration text, while the Web UI displays their titles and descriptions in the current UI language.
 - Background events and subtask stage text use stable English runtime data, avoiding mixed Chinese status text in the English UI.
 - Idle skill validation previously created a background request storm by repeatedly auto-retrying `needs_changes` skills. It now uses a global low-frequency deduplicated queue: default every 6 hours, serial validation, at most 3 per window, and current-fingerprint `needs_changes` / `invalid` reports no longer auto-retry.
-- Fixed: skill organization could exceed model context limits or keep retrying one problematic evidence range, blocking later skill discovery. Skill organization now downgrades and recovers batch size, uses round-based `skill_read` windows, injects tool calls without raw tool results, and skips repeatedly failing evidence ranges so the timeline can continue.
+- Fixed in `v1.1.20-hot-fix-2`: skill organization could exceed model context limits or keep retrying one problematic evidence range, blocking later skill discovery. Skill organization now downgrades and recovers batch size, uses round-based `skill_read` windows, injects tool calls without raw tool results, and skips repeatedly failing evidence ranges so the timeline can continue.
 - Skills can be exported as zip packages; importing still goes through learning and validation, so external skill packages do not bypass local safety checks.
 - Catch-up for built-in memory organization and skill organization is deduplicated by `agent + taskId`. If several triggers were missed while offline, each organizer is compensated once. Skill validation is not part of startup catch-up and remains driven by idle state.
 - Tasks created through `task_manager` keep at most 3 steps so long checklists do not overcrowd the Chat UI.

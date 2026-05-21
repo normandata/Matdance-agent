@@ -43,4 +43,24 @@ public static class TokenCounter
         }
         return total;
     }
+
+    public static int EstimateTools(IEnumerable<ToolDefinition>? tools)
+    {
+        if (tools == null) return 0;
+
+        var total = 0;
+        foreach (var tool in tools)
+        {
+            total += Estimate(tool.Name);
+            total += Estimate(tool.Description);
+            total += Estimate(tool.Parameters.ToJsonString());
+        }
+
+        return total;
+    }
+
+    public static int EstimateRequest(IEnumerable<Models.ChatMessage> messages, IEnumerable<ToolDefinition>? tools = null)
+    {
+        return EstimateMessages(messages) + EstimateTools(tools);
+    }
 }

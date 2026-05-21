@@ -15,7 +15,7 @@ public class LlmClient
     private readonly AgentConfig _config;
     private static readonly ConcurrentDictionary<string, bool> EndpointsWithoutClientHeaders = new(StringComparer.OrdinalIgnoreCase);
     private const bool ThinkingTemporarilyDisabled = true;
-    private const string ClientUserAgent = "Matdance/1.1.20-preview";
+    private const string ClientUserAgent = "Matdance/1.1.21-preview";
     private const string ClientName = "Matdance";
     private const int MaxLoggedRequestChars = 20_000;
     private const int ImagePayloadRetryCutoffAttempt = 3;
@@ -43,6 +43,34 @@ public class LlmClient
             return await SendAnthropicAsync(messages, tools, onStreamChunk, ct, beforeRetryDelay, onReasoningChunk, enableThinking);
         }
         return await SendOpenAiAsync(messages, tools, onStreamChunk, ct, beforeRetryDelay, onReasoningChunk, enableThinking);
+    }
+
+    public static bool IsContextLimitError(Exception ex)
+    {
+        var message = ex.Message ?? string.Empty;
+        if (ex is HttpRequestException httpEx)
+        {
+            var status = httpEx.StatusCode.HasValue ? (int)httpEx.StatusCode.Value : 0;
+            if (status == 413)
+                return true;
+        }
+
+        var needles = new[]
+        {
+            "context_length_exceeded",
+            "context length",
+            "maximum context",
+            "max context",
+            "context window",
+            "too many tokens",
+            "token limit",
+            "tokens exceed",
+            "input is too long",
+            "prompt is too long",
+            "request too large"
+        };
+
+        return needles.Any(needle => message.Contains(needle, StringComparison.OrdinalIgnoreCase));
     }
 
     private async Task<ChatMessage> SendOpenAiAsync(

@@ -72,6 +72,7 @@ public class ChatLoop
             if (trimmed == "/clear")
             {
                 _sessionState.Messages.Clear();
+                _sessionState.ContextCompaction = null;
                 SaveState();
                 AnsiConsole.MarkupLine("[dim]Context cleared.[/]");
                 ChatRenderer.RenderStatusBar(_sessionData, _sessionState, _config);
@@ -136,6 +137,7 @@ public class ChatLoop
                 // Replace main context messages with compressed, keep excluded messages
                 var excludedMessages = _sessionState.Messages.Where(m => m.IncludeInMainContext == false).ToList();
                 _sessionState.Messages = excludedMessages.Concat(compressed).ToList();
+                _sessionState.ContextCompaction = null;
                 
                 var after = _sessionState.Messages.Count;
                 SaveState();
@@ -154,23 +156,13 @@ public class ChatLoop
         _sessionData.TotalMessages++;
         ChatRenderer.RenderUserMessage(input);
 
-        // Compress context if needed before building request
-        var mainContextMessages = _sessionState.Messages.Where(PromptBuilder.ShouldIncludeInMainContext).ToList();
+        // Build the full request first, then compress against the real prompt budget.
+        var rawMainContextCount = _sessionState.Messages.Count(PromptBuilder.ShouldIncludeInMainContext);
+        var mainContextMessages = BuildMainContextWithCompaction(out var baseCompressedCount, out var usedStoredSummary);
         var compressor = new ContextCompressor(_config);
-        List<ChatMessage> compressedHistory;
-        if (compressor.ShouldCompress(mainContextMessages))
-        {
-            AnsiConsole.MarkupLine("[dim yellow][[context]] Compressing conversation history...[/]");
-            compressedHistory = await compressor.CompressAsync(mainContextMessages, ct);
-            AnsiConsole.MarkupLine($"[dim green][[context]] Compressed {mainContextMessages.Count} messages into {compressedHistory.Count} messages.[/]");
-        }
-        else
-        {
-            compressedHistory = mainContextMessages;
-        }
 
         // Build request messages but don't add to persistent history yet
-        var messages = PromptBuilder.BuildRequestMessages(_agentName, _path, _config, _sessionState, compressedHistory);
+        var messages = PromptBuilder.BuildRequestMessages(_agentName, _path, _config, _sessionState, mainContextMessages);
         var privacyRevocationNotice = new SecuritySettingsService().ConsumePrivacyAccessRevokedNotice();
         if (!string.IsNullOrWhiteSpace(privacyRevocationNotice))
         {
@@ -180,6 +172,8 @@ public class ChatLoop
         messages.Add(userMsg);
 
         var tools = ToolRegistry.GetAll();
+        var initialCompression = await EnsureRequestBudgetAsync(messages, tools, compressor, ct);
+        RecordContextCompaction(initialCompression, rawMainContextCount, baseCompressedCount, usedStoredSummary);
         bool userMsgSaved = false;
 
         try
@@ -195,7 +189,9 @@ public class ChatLoop
             {
                 loop++;
                 PromptBuilder.UpsertLiveFileLocksSnapshot(messages, _sessionState);
-                var assistantMsg = await CallLlmAsync(messages, tools, ct, enableThinking: false);
+                await EnsureRequestBudgetAsync(messages, tools, compressor, ct);
+                var assistantMsg = await CallLlmWithContextRetryAsync(messages, tools, compressor, ct, enableThinking: false);
+                messages.RemoveAll(ContextCompressor.IsOneShotHandoff);
                 var hasCurrentToolCalls = assistantMsg.ToolCalls != null && assistantMsg.ToolCalls.Count > 0;
                 if (!hasCurrentToolCalls && !thinkingToolNoticeSent && LlmResponseGuard.HasTextualToolRequestInThinking(assistantMsg))
                 {
@@ -275,6 +271,112 @@ public class ChatLoop
         _sessionState.ClearTraceLocks();
         SaveState();
         ChatRenderer.RenderStatusBar(_sessionData, _sessionState, _config);
+    }
+
+    private async Task<ContextCompressionResult> EnsureRequestBudgetAsync(
+        List<ChatMessage> messages,
+        List<ToolDefinition> tools,
+        ContextCompressor compressor,
+        CancellationToken ct,
+        bool force = false)
+    {
+        var result = await compressor.CompressRequestAsync(messages, tools, ct, force);
+        if (!result.Compressed)
+            return result;
+
+        messages.Clear();
+        messages.AddRange(result.Messages);
+        AnsiConsole.MarkupLine($"[dim yellow][[context]] compressed request to {result.EstimatedTokens:N0}/{result.Limit:N0} estimated tokens.[/]");
+        return result;
+    }
+
+    private List<ChatMessage> BuildMainContextWithCompaction(out int baseCompressedCount, out bool usedStoredSummary)
+    {
+        var raw = _sessionState.Messages.Where(PromptBuilder.ShouldIncludeInMainContext).ToList();
+        baseCompressedCount = 0;
+        usedStoredSummary = false;
+
+        var compaction = _sessionState.ContextCompaction;
+        if (compaction == null || string.IsNullOrWhiteSpace(compaction.Summary))
+            return raw;
+
+        var point = Math.Clamp(compaction.CompressedUntilMessageCount, 0, raw.Count);
+        if (point <= 0)
+            return raw;
+
+        baseCompressedCount = point;
+        usedStoredSummary = true;
+        var result = new List<ChatMessage> { ContextCompressor.SummaryMessage(compaction.Summary) };
+        result.AddRange(raw.Skip(point));
+        return result;
+    }
+
+    private void RecordContextCompaction(
+        ContextCompressionResult result,
+        int rawMainContextCount,
+        int baseCompressedCount,
+        bool usedStoredSummary)
+    {
+        if (!result.Compressed || string.IsNullOrWhiteSpace(result.SummaryContent))
+            return;
+
+        var covered = result.CompressedSourceMessageCount;
+        if (covered <= 0)
+            return;
+
+        var rawCovered = usedStoredSummary && covered > 0
+            ? baseCompressedCount + Math.Max(0, covered - 1)
+            : covered;
+        rawCovered = Math.Clamp(rawCovered, 0, rawMainContextCount);
+        if (rawCovered <= 0)
+            return;
+
+        _sessionState.ContextCompaction = new ContextCompactionInfo
+        {
+            Generation = (_sessionState.ContextCompaction?.Generation ?? 0) + 1,
+            CompressedUntilMessageCount = rawCovered,
+            Summary = result.SummaryContent,
+            LastHandoff = result.HandoffContent,
+            CreatedAt = UserTimeZoneService.Now()
+        };
+    }
+
+    private async Task<ChatMessage> CallLlmWithContextRetryAsync(
+        List<ChatMessage> messages,
+        List<ToolDefinition> tools,
+        ContextCompressor compressor,
+        CancellationToken ct,
+        bool enableThinking)
+    {
+        try
+        {
+            return await CallLlmAsync(messages, tools, ct, enableThinking);
+        }
+        catch (Exception ex) when (LlmClient.IsContextLimitError(ex) && !ct.IsCancellationRequested)
+        {
+            CalibrateContextWindowAfterLimitError(messages, tools);
+            AnsiConsole.MarkupLine("[dim yellow][[context]] upstream reported a context limit; recalibrating and retrying with forced compression...[/]");
+            compressor = new ContextCompressor(_config);
+            await EnsureRequestBudgetAsync(messages, tools, compressor, ct, force: true);
+            return await CallLlmAsync(messages, tools, ct, enableThinking);
+        }
+    }
+
+    private void CalibrateContextWindowAfterLimitError(List<ChatMessage> messages, List<ToolDefinition> tools)
+    {
+        var observed = ContextCompressor.EstimateObservedContextWindowAfterLimitError(_config, messages, tools);
+        if (observed >= _config.ContextWindow)
+            return;
+
+        _config.ContextWindow = observed;
+        try
+        {
+            _config.Save(_path.GetAgentConfigJsonPath(_agentName));
+        }
+        catch (Exception ex)
+        {
+            AnsiConsole.MarkupLine($"[dim yellow][[context]] failed to save calibrated context window: {ex.Message.EscapeMarkup()}[/]");
+        }
     }
 
     private async Task<ChatMessage> CallLlmAsync(List<ChatMessage> messages, List<ToolDefinition> tools, CancellationToken ct, bool enableThinking)

@@ -19,6 +19,10 @@ public class SessionState
     [JsonPropertyName("file_edit_audits")]
     public List<FileEditAuditInfo> FileEditAudits { get; set; } = new();
 
+    [JsonPropertyName("context_compaction")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public ContextCompactionInfo? ContextCompaction { get; set; }
+
     public int ClearTraceLocks()
     {
         var count = TracedFiles.Count;
@@ -59,6 +63,10 @@ public class SessionState
             if (audit.Timestamp != default && audit.Timestamp != DateTimeOffset.MinValue)
                 audit.Timestamp = UserTimeZoneService.ToUserTime(audit.Timestamp);
         }
+
+        var compaction = ContextCompaction;
+        if (compaction != null && compaction.CreatedAt != default && compaction.CreatedAt != DateTimeOffset.MinValue)
+            compaction.CreatedAt = UserTimeZoneService.ToUserTime(compaction.CreatedAt);
     }
 
     public static SessionState Load(string sessionJsonPath)
@@ -74,6 +82,25 @@ public class SessionState
         state.NormalizeTimeZone();
         return state;
     }
+}
+
+public class ContextCompactionInfo
+{
+    [JsonPropertyName("generation")]
+    public int Generation { get; set; }
+
+    [JsonPropertyName("compressed_until_message_count")]
+    public int CompressedUntilMessageCount { get; set; }
+
+    [JsonPropertyName("summary")]
+    public string Summary { get; set; } = string.Empty;
+
+    [JsonPropertyName("last_handoff")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? LastHandoff { get; set; }
+
+    [JsonPropertyName("created_at")]
+    public DateTimeOffset CreatedAt { get; set; } = UserTimeZoneService.Now();
 }
 
 public class ActiveTaskInfo

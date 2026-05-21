@@ -6,7 +6,7 @@
 
 Language: English | [中文](README.zh-CN.md)
 
-Current version: v1.1.20-hot-fix-2
+Current version: v1.1.21-preview
 
 Matdance is a local-first C# agent runtime. It brings the Web UI, conversations, memory, skills, workspaces, scheduled tasks, browser automation, file previews, multimodal asset generation, and background maintenance into one persistent local system.
 
@@ -14,8 +14,9 @@ It is not just a chat wrapper. Matdance is designed around whether an agent can 
 
 Strong recommendation: read [FULL-DOC.md](FULL-DOC.md). `FULL-DOC.md` and [FULL-DOC.zh-CN.md](FULL-DOC.zh-CN.md) are intended to carry the same complete content in different languages. This README is only the repository entrance.
 
-## Hot Fix Status
+## Preview Status
 
+- `v1.1.21-preview` optimizes main conversation context compression. Automatic and manual compaction now estimate the full request budget, preserve the latest three user turns, use segmented downgrade/recovery, keep a one-shot handoff only for the compressed retry, and reuse compacted sidecar summaries on later turns.
 - Fixed in `v1.1.20-hot-fix-2`: skill organization could exceed model context limits or repeatedly fail on one bad evidence range, preventing later conversations from being organized into skills. Skill organization now uses adaptive batch downgrade/recovery, round-based `skill_read` windows, tool-call-only evidence compression, and poison-batch skip after repeated recoverable failures.
 
 ## Contents

@@ -2,9 +2,9 @@
 
 Language: [English](quickly_start.md) | 中文
 
-当前版本：v1.1.20-preview
+当前版本：v1.1.21-preview
 
-v1.1.20-preview 的重点是 Web UI 公网包装、macOS 部署修复、浏览器工具链扩展、提示音与技能/记忆整理边界收敛，以及长期运行状态在本机和 public 模式之间的可切换性。Web UI 托管进程仍会从 shadow 目录启动，源码入口在需要 build/run 前会尽量暂停并恢复占用服务。
+v1.1.21-preview 的重点是主会话上下文压缩、可降级/可回升的长上下文恢复、一次性 handoff 交接，以及技能/记忆整理边界的长期运行稳定性。Web UI 托管进程仍会从 shadow 目录启动，源码入口在需要 build/run 前会尽量暂停并恢复占用服务。
 
 这份文件只放启动、依赖、入口注册和配置。README 负责解释 Matdance 是什么，这里负责让它跑起来。别把两种文档搅在一起。
 

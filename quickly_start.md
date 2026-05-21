@@ -2,7 +2,7 @@
 
 Language: English | [中文](quickly_start.zh-CN.md)
 
-Current version: v1.1.20-preview
+Current version: v1.1.21-preview
 
 This file only covers startup, dependencies, entry registration, and configuration. `README.md` explains what Matdance is, and [FULL-DOC.md](FULL-DOC.md) explains the system in depth.
 
