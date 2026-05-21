@@ -108,6 +108,7 @@ public partial class ToolExecutor
             "file_write" => ExecuteFileWrite(args),
             "file_write_locks" => ExecuteFileWriteLocks(args),
             "file_write_lock_close" => ExecuteFileWriteLockClose(args),
+            "session_list" => ExecuteSessionList(args),
             "scheduled_task_create" => ExecuteScheduledTaskCreate(args),
             "scheduled_task_edit" => ExecuteScheduledTaskEdit(args),
             "scheduled_task_list" => ExecuteScheduledTaskList(args),

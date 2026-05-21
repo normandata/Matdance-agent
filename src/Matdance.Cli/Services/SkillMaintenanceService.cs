@@ -1659,6 +1659,8 @@ public sealed class SkillMaintenanceService
                 var file = _path.GetSessionJsonPath(agent, bookmark.SessionId);
                 if (!File.Exists(file)) continue;
                 var data = SessionData.Load(file);
+                if (data.IsScheduledNotification)
+                    continue;
 
                 var statePath = _path.GetSessionStateJsonPath(agent, bookmark.SessionId);
                 var messages = new List<ChatMessage>();

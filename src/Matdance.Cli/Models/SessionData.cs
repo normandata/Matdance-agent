@@ -9,6 +9,23 @@ public class SessionData
     [JsonPropertyName("session_id")]
     public string SessionId { get; set; } = string.Empty;
 
+    [JsonPropertyName("display_title")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? DisplayTitle { get; set; }
+
+    [JsonPropertyName("kind")]
+    public string Kind { get; set; } = SessionKinds.Chat;
+
+    [JsonPropertyName("is_read_only")]
+    public bool IsReadOnly { get; set; }
+
+    [JsonPropertyName("created_by_scheduled_task_id")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? CreatedByScheduledTaskId { get; set; }
+
+    [JsonIgnore]
+    public bool IsScheduledNotification => IsReadOnly && string.Equals(Kind, SessionKinds.ScheduledNotification, StringComparison.OrdinalIgnoreCase);
+
     [JsonPropertyName("context_usage")]
     public int ContextUsage { get; set; } = 0;
 
@@ -60,6 +77,12 @@ public class SessionData
         data.NormalizeTimeZone();
         return data;
     }
+}
+
+public static class SessionKinds
+{
+    public const string Chat = "chat";
+    public const string ScheduledNotification = "scheduled_notification";
 }
 
 public class SessionTask

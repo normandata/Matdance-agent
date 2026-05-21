@@ -45,8 +45,8 @@ public class ScheduledTaskService
             CreatedAt = userNow,
             UpdatedAt = userNow
         };
-        task.Targets = NormalizeTargets(agent, request.Targets, task.CreatedFromSession);
         task.NextRunAt = ComputeNextRunAtOrThrow(task, now);
+        task.Targets = NormalizeTargets(agent, request.Targets, task.CreatedFromSession, task.Title, task.TaskId);
         lock (Gate)
         {
             var tasks = LoadCore(agent);
@@ -70,11 +70,14 @@ public class ScheduledTaskService
             if (!string.IsNullOrWhiteSpace(request.TimeZone)) task.TimeZone = NormalizeTimeZone(request.TimeZone);
             if (!string.IsNullOrWhiteSpace(request.Status)) task.Status = request.Status.Trim().ToLowerInvariant();
             if (request.Schedule != null) task.Schedule = request.Schedule;
-            if (request.Targets != null) task.Targets = NormalizeTargets(agent, request.Targets, task.CreatedFromSession);
             task.UpdatedAt = UserTimeZoneService.Now();
             task.NextRunAt = task.Status == ScheduledTaskStatuses.Enabled
                 ? ComputeNextRunAtOrThrow(task, DateTimeOffset.UtcNow)
                 : null;
+            if (request.Targets != null)
+                task.Targets = NormalizeTargets(agent, request.Targets, task.CreatedFromSession, task.Title, task.TaskId);
+            else
+                RefreshNotificationSessionTitles(agent, task);
             SaveCore(agent, tasks);
             return Clone(task);
         }
@@ -215,6 +218,8 @@ public class ScheduledTaskService
             var tasks = LoadCore(agent);
             var task = FindVisibleTask(tasks, taskId);
             if (task == null || task.RunState == ScheduledTaskRunStates.Running) return null;
+            if (manual && task.IsSystem)
+                throw new InvalidOperationException("System scheduled tasks cannot be manually tested.");
 
             var nowUtc = DateTimeOffset.UtcNow;
             if (!manual)
@@ -332,35 +337,40 @@ public class ScheduledTaskService
             var task = FindVisibleTask(tasks, run.TaskId) ?? tasks.FirstOrDefault(item => item.TaskId == run.TaskId);
             if (task != null)
             {
+                var manualRun = string.Equals(run.Trigger, "manual", StringComparison.OrdinalIgnoreCase);
                 task.RunState = ScheduledTaskRunStates.Idle;
                 ClearActiveRun(task);
-                task.LastRunAt = run.FinishedAt;
-                task.LastRunStatus = run.Status;
-                task.LastRunSummary = Trim(run.Output ?? run.Error ?? run.Diagnostic ?? string.Empty, 500);
                 task.UpdatedAt = UserTimeZoneService.Now();
 
-                if (run.Status == ScheduledTaskRunStatuses.Stalled)
+                if (!manualRun)
                 {
-                    task.StalledUntil = DateTimeOffset.UtcNow.Add(StalledBackoff);
-                    task.FailureCount++;
-                }
-                else if (run.Status == ScheduledTaskRunStatuses.Failed)
-                {
-                    task.FailureCount++;
-                    task.StalledUntil = null;
-                }
-                else if (run.Status == ScheduledTaskRunStatuses.Succeeded)
-                {
-                    task.StalledUntil = null;
-                }
+                    task.LastRunAt = run.FinishedAt;
+                    task.LastRunStatus = run.Status;
+                    task.LastRunSummary = Trim(run.Output ?? run.Error ?? run.Diagnostic ?? string.Empty, 500);
 
-                if (run.Trigger != "manual" && ConsumesScheduledOccurrence(run.Status))
-                {
-                    task.RunCount++;
-                    var nextAfter = run.ScheduledAt ?? DateTimeOffset.UtcNow;
-                    task.NextRunAt = ComputeNextRunAt(task, nextAfter);
-                    if (task.Status == ScheduledTaskStatuses.Enabled && task.NextRunAt == null)
-                        task.Status = ScheduledTaskStatuses.Completed;
+                    if (run.Status == ScheduledTaskRunStatuses.Stalled)
+                    {
+                        task.StalledUntil = DateTimeOffset.UtcNow.Add(StalledBackoff);
+                        task.FailureCount++;
+                    }
+                    else if (run.Status == ScheduledTaskRunStatuses.Failed)
+                    {
+                        task.FailureCount++;
+                        task.StalledUntil = null;
+                    }
+                    else if (run.Status == ScheduledTaskRunStatuses.Succeeded)
+                    {
+                        task.StalledUntil = null;
+                    }
+
+                    if (ConsumesScheduledOccurrence(run.Status))
+                    {
+                        task.RunCount++;
+                        var nextAfter = run.ScheduledAt ?? DateTimeOffset.UtcNow;
+                        task.NextRunAt = ComputeNextRunAt(task, nextAfter);
+                        if (task.Status == ScheduledTaskStatuses.Enabled && task.NextRunAt == null)
+                            task.Status = ScheduledTaskStatuses.Completed;
+                    }
                 }
 
                 SaveCore(run.Agent, tasks);
@@ -446,14 +456,34 @@ public class ScheduledTaskService
         if (!Directory.Exists(sessionsDir)) return result.ToList();
         foreach (var target in task.Targets)
         {
-            if (target.Type == ScheduledTaskTargetTypes.AllAgentSessions)
+            var targetType = string.IsNullOrWhiteSpace(target.Type)
+                ? ScheduledTaskTargetTypes.CreatedSession
+                : target.Type.Trim().ToLowerInvariant();
+            if (targetType == ScheduledTaskTargetTypes.AllAgentSessions)
             {
                 foreach (var file in Directory.GetFiles(sessionsDir, "*.json").Where(file => !Path.GetFileName(file).EndsWith(".state.json", StringComparison.OrdinalIgnoreCase)))
+                {
+                    if (IsScheduledNotificationSessionFile(file))
+                        continue;
                     result.Add(Path.GetFileNameWithoutExtension(file));
+                }
                 continue;
             }
-            var sessionId = target.Type == ScheduledTaskTargetTypes.CreatedSession ? task.CreatedFromSession : target.SessionId;
-            if (!string.IsNullOrWhiteSpace(sessionId) && File.Exists(Path.Combine(sessionsDir, sessionId + ".json")))
+            var sessionId = targetType == ScheduledTaskTargetTypes.CreatedSession ? task.CreatedFromSession : target.SessionId;
+            if (string.IsNullOrWhiteSpace(sessionId))
+                continue;
+
+            var sessionFile = Path.Combine(sessionsDir, sessionId + ".json");
+            if (!File.Exists(sessionFile))
+                continue;
+
+            if (targetType != ScheduledTaskTargetTypes.NotificationSession && IsScheduledNotificationSessionFile(sessionFile))
+                continue;
+
+            if (targetType == ScheduledTaskTargetTypes.NotificationSession && !IsScheduledNotificationSessionFile(sessionFile))
+                continue;
+
+            if (!string.IsNullOrWhiteSpace(sessionId))
                 result.Add(sessionId);
         }
         return result.ToList();
@@ -808,11 +838,123 @@ public class ScheduledTaskService
         return new List<TimeSpan> { ParseTime(schedule.Time) };
     }
 
-    private List<ScheduledTaskTarget> NormalizeTargets(string agent, List<ScheduledTaskTarget>? targets, string? createdSession)
+    private List<ScheduledTaskTarget> NormalizeTargets(string agent, List<ScheduledTaskTarget>? targets, string? createdSession, string notificationTitle, string taskId)
     {
         if (targets == null || targets.Count == 0)
-            return string.IsNullOrWhiteSpace(createdSession) ? new List<ScheduledTaskTarget>() : new List<ScheduledTaskTarget> { new() { Type = ScheduledTaskTargetTypes.CreatedSession } };
-        return targets;
+        {
+            if (string.IsNullOrWhiteSpace(createdSession))
+                return new List<ScheduledTaskTarget>();
+            if (IsScheduledNotificationSessionFile(_path.GetSessionJsonPath(agent, createdSession)))
+                throw new InvalidOperationException($"Source session '{createdSession}' is a read-only scheduled-task notification session. Use notification_session or choose a normal chat session.");
+            return new List<ScheduledTaskTarget> { new() { Type = ScheduledTaskTargetTypes.CreatedSession } };
+        }
+
+        var normalized = new List<ScheduledTaskTarget>();
+        foreach (var target in targets)
+        {
+            var type = string.IsNullOrWhiteSpace(target.Type)
+                ? ScheduledTaskTargetTypes.CreatedSession
+                : target.Type.Trim().ToLowerInvariant();
+            if (type != ScheduledTaskTargetTypes.CreatedSession &&
+                type != ScheduledTaskTargetTypes.Session &&
+                type != ScheduledTaskTargetTypes.AllAgentSessions &&
+                type != ScheduledTaskTargetTypes.NotificationSession)
+                throw new InvalidOperationException($"Invalid target type '{target.Type}'.");
+
+            if (type == ScheduledTaskTargetTypes.Session && string.IsNullOrWhiteSpace(target.SessionId))
+                throw new InvalidOperationException("targets[].sessionId is required when target type is session.");
+            if (type == ScheduledTaskTargetTypes.CreatedSession && string.IsNullOrWhiteSpace(createdSession))
+                throw new InvalidOperationException("created_session target requires a source session. Use an explicit session target or no targets.");
+
+            var sessionId = string.IsNullOrWhiteSpace(target.SessionId) ? null : _path.NormalizeSessionId(target.SessionId.Trim());
+            if (type == ScheduledTaskTargetTypes.Session && !File.Exists(_path.GetSessionJsonPath(agent, sessionId!)))
+                throw new InvalidOperationException($"Target session '{target.SessionId}' was not found. Use session_list and ask the user to confirm an existing sessionId.");
+            if (type == ScheduledTaskTargetTypes.CreatedSession && !string.IsNullOrWhiteSpace(createdSession) && !File.Exists(_path.GetSessionJsonPath(agent, createdSession)))
+                throw new InvalidOperationException($"Source session '{createdSession}' was not found. Use an explicit existing session target or no targets.");
+            if (type == ScheduledTaskTargetTypes.Session && IsScheduledNotificationSessionFile(_path.GetSessionJsonPath(agent, sessionId!)))
+                throw new InvalidOperationException($"Target session '{target.SessionId}' is a read-only scheduled-task notification session. Use notification_session to create or maintain a task's dedicated notification session.");
+            if (type == ScheduledTaskTargetTypes.CreatedSession && !string.IsNullOrWhiteSpace(createdSession) && IsScheduledNotificationSessionFile(_path.GetSessionJsonPath(agent, createdSession)))
+                throw new InvalidOperationException($"Source session '{createdSession}' is a read-only scheduled-task notification session. Use notification_session or choose a normal chat session.");
+            if (type == ScheduledTaskTargetTypes.NotificationSession)
+            {
+                sessionId = string.IsNullOrWhiteSpace(sessionId)
+                    ? CreateNotificationSession(agent, notificationTitle, taskId)
+                    : EnsureNotificationSession(agent, sessionId, notificationTitle, taskId);
+            }
+
+            normalized.Add(new ScheduledTaskTarget
+            {
+                Type = type,
+                SessionId = sessionId
+            });
+        }
+        return normalized;
+    }
+
+    private string CreateNotificationSession(string agent, string title, string taskId)
+    {
+        var now = UserTimeZoneService.Now();
+        string sessionId;
+        string sessionFile;
+        do
+        {
+            sessionId = "notice_" + DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + "_" + Guid.NewGuid().ToString("N")[..8];
+            sessionFile = _path.GetSessionJsonPath(agent, sessionId);
+        }
+        while (File.Exists(sessionFile));
+
+        var data = new SessionData
+        {
+            SessionId = sessionId,
+            DisplayTitle = Trim(title, 120),
+            Kind = SessionKinds.ScheduledNotification,
+            IsReadOnly = true,
+            CreatedByScheduledTaskId = taskId,
+            CreateAt = now,
+            LastActivity = now
+        };
+        data.Save(sessionFile);
+        new SessionState().Save(sessionFile);
+        return sessionId;
+    }
+
+    private string EnsureNotificationSession(string agent, string sessionId, string title, string taskId)
+    {
+        var sessionFile = _path.GetSessionJsonPath(agent, sessionId);
+        if (!File.Exists(sessionFile))
+            throw new InvalidOperationException($"Notification session '{sessionId}' was not found.");
+
+        var data = SessionData.Load(sessionFile);
+        if (!data.IsScheduledNotification)
+            throw new InvalidOperationException($"Session '{sessionId}' is not a scheduled-task notification session.");
+
+        data.DisplayTitle = Trim(title, 120);
+        data.Kind = SessionKinds.ScheduledNotification;
+        data.IsReadOnly = true;
+        data.CreatedByScheduledTaskId = string.IsNullOrWhiteSpace(data.CreatedByScheduledTaskId) ? taskId : data.CreatedByScheduledTaskId;
+        data.Save(sessionFile);
+        return sessionId;
+    }
+
+    private void RefreshNotificationSessionTitles(string agent, ScheduledTaskItem task)
+    {
+        foreach (var target in task.Targets.Where(target => string.Equals(target.Type, ScheduledTaskTargetTypes.NotificationSession, StringComparison.OrdinalIgnoreCase)))
+        {
+            if (!string.IsNullOrWhiteSpace(target.SessionId))
+                EnsureNotificationSession(agent, target.SessionId, task.Title, task.TaskId);
+        }
+    }
+
+    private static bool IsScheduledNotificationSessionFile(string file)
+    {
+        try
+        {
+            return SessionData.Load(file).IsScheduledNotification;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private bool AgentExists(string agent) => Directory.Exists(_path.GetAgentPath(agent));
@@ -841,6 +983,62 @@ public class ScheduledTaskService
         var validTypes = new[] { ScheduledTaskScheduleTypes.Once, ScheduledTaskScheduleTypes.Interval, ScheduledTaskScheduleTypes.AfterCount, ScheduledTaskScheduleTypes.Daily, ScheduledTaskScheduleTypes.DailyCount, ScheduledTaskScheduleTypes.DailyWindow, ScheduledTaskScheduleTypes.DailyTimes };
         if (string.IsNullOrWhiteSpace(type) || !validTypes.Contains(type))
             throw new InvalidOperationException($"Invalid schedule type '{schedule.Type}'. Must be one of: {string.Join(", ", validTypes)}. Example: {{\"type\":\"daily\",\"time\":\"09:30\"}}");
+        schedule.Type = type;
+
+        switch (type)
+        {
+            case ScheduledTaskScheduleTypes.Once:
+                Require(schedule.RunAt, "schedule.runAt");
+                break;
+
+            case ScheduledTaskScheduleTypes.Daily:
+                Require(schedule.Time, "schedule.time");
+                _ = ParseTime(schedule.Time);
+                break;
+
+            case ScheduledTaskScheduleTypes.DailyTimes:
+                if (schedule.Times == null || schedule.Times.Count == 0)
+                    throw new InvalidOperationException("schedule.times is required for daily_times.");
+                foreach (var time in schedule.Times)
+                    _ = ParseTime(time);
+                break;
+
+            case ScheduledTaskScheduleTypes.DailyWindow:
+            {
+                Require(schedule.WindowStart, "schedule.windowStart");
+                Require(schedule.WindowEnd, "schedule.windowEnd");
+                var start = ParseTime(schedule.WindowStart);
+                var end = ParseTime(schedule.WindowEnd);
+                if (end < start)
+                    throw new InvalidOperationException("daily_window does not support overnight windows. Choose a same-day window or split it into separate tasks.");
+                if (schedule.IntervalMinutes == null || schedule.IntervalMinutes < 1)
+                    throw new InvalidOperationException("schedule.intervalMinutes must be at least 1 for daily_window.");
+                break;
+            }
+
+            case ScheduledTaskScheduleTypes.DailyCount:
+                Require(schedule.StartTime ?? schedule.Time, "schedule.startTime");
+                if (schedule.CountPerDay == null || schedule.CountPerDay < 1)
+                    throw new InvalidOperationException("schedule.countPerDay must be at least 1 for daily_count.");
+                if (schedule.CountPerDay > 1 && (schedule.IntervalMinutes == null || schedule.IntervalMinutes < 1))
+                    throw new InvalidOperationException("schedule.intervalMinutes must be at least 1 when daily_count runs more than once per day.");
+                _ = ParseTime(schedule.StartTime ?? schedule.Time);
+                break;
+
+            case ScheduledTaskScheduleTypes.Interval:
+                Require(schedule.StartAt, "schedule.startAt");
+                if (schedule.IntervalMinutes == null || schedule.IntervalMinutes < 1)
+                    throw new InvalidOperationException("schedule.intervalMinutes must be at least 1 for interval.");
+                break;
+
+            case ScheduledTaskScheduleTypes.AfterCount:
+                Require(schedule.StartAt, "schedule.startAt");
+                if (schedule.IntervalMinutes == null || schedule.IntervalMinutes < 1)
+                    throw new InvalidOperationException("schedule.intervalMinutes must be at least 1 for after_count.");
+                if (schedule.MaxRuns == null || schedule.MaxRuns < 1)
+                    throw new InvalidOperationException("schedule.maxRuns must be at least 1 for after_count.");
+                break;
+        }
     }
 
     private static DateTimeOffset? ComputeNextRunAtOrThrow(ScheduledTaskItem task, DateTimeOffset afterUtc)

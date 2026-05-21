@@ -223,6 +223,7 @@ public class MemoryOrganizationService
         foreach (var file in Directory.GetFiles(sessionsDir, "*.json"))
         {
             if (file.EndsWith(".state.json", StringComparison.OrdinalIgnoreCase)) continue;
+            if (IsScheduledNotificationSession(file)) continue;
             var sessionId = Path.GetFileNameWithoutExtension(file);
             var current = inspector.Inspect(agent, sessionId);
             sessions.Add(new SessionBookmark
@@ -276,6 +277,18 @@ public class MemoryOrganizationService
             });
         }
         return tasks;
+    }
+
+    private static bool IsScheduledNotificationSession(string file)
+    {
+        try
+        {
+            return SessionData.Load(file).IsScheduledNotification;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private List<SessionOrganizationWorkItem> BuildSessionWorkItems(string agent, List<SessionBookmark> bookmarks, string strategy)

@@ -354,6 +354,8 @@ public sealed class WebServer
             {
                 var agent = NormalizeAgentName(request.Agent);
                 var taskInfo = scheduledTasks.Read(agent, request.TaskId);
+                if (taskInfo.IsSystem)
+                    return (IResult)Results.BadRequest("System scheduled tasks cannot be manually tested.");
                 var resource = BackgroundWorkCoordinator.GetScheduledTaskResourceKey(taskInfo);
                 using var foregroundLease = _backgroundWork.BeginForegroundWork(agent);
                 IDisposable? resourceLease = null;
@@ -369,7 +371,7 @@ public sealed class WebServer
                 {
                     var task = scheduledTasks.TryStartRun(agent, request.TaskId, manual: true);
                     if (task == null) return (IResult)Results.BadRequest("Scheduled task is not available or already running.");
-                    var run = await scheduledRunner.ExecuteAsync(task, "manual", DateTimeOffset.UtcNow, deliver ?? false, linked.Token);
+                    var run = await scheduledRunner.ExecuteAsync(task, "manual", null, deliver ?? true, linked.Token);
                     scheduledTasks.FinishRun(run);
                     return (IResult)Results.Json(run, JsonOptions);
                 }
@@ -2016,6 +2018,10 @@ public sealed class WebServer
                 {
                     id = string.IsNullOrWhiteSpace(session.SessionId) ? Path.GetFileNameWithoutExtension(file) : session.SessionId,
                     sessionId = string.IsNullOrWhiteSpace(session.SessionId) ? Path.GetFileNameWithoutExtension(file) : session.SessionId,
+                    displayTitle = session.DisplayTitle,
+                    kind = session.Kind,
+                    isReadOnly = session.IsReadOnly,
+                    createdByScheduledTaskId = session.CreatedByScheduledTaskId,
                     createdAt = session.CreateAt,
                     contextUsage = session.ContextUsage,
                     totalMessages = session.TotalMessages,
@@ -2047,6 +2053,8 @@ public sealed class WebServer
         new SessionData
         {
             SessionId = sessionId,
+            Kind = SessionKinds.Chat,
+            IsReadOnly = false,
             CreateAt = UserTimeZoneService.Now(),
             LastActivity = UserTimeZoneService.Now()
         }.Save(filePath);
@@ -2114,6 +2122,13 @@ public sealed class WebServer
             request.Agent = NormalizeAgentName(request.Agent);
             request.Session = NormalizeSessionId(request.Session);
             EnsureAgentExists(request.Agent);
+            var sessionFile = GetSessionFile(request.Agent, request.Session);
+            var sessionData = SessionData.Load(sessionFile);
+            if (sessionData.IsReadOnly)
+            {
+                await WriteEventAsync(context, "error", new { message = "This session is read-only and only accepts scheduled-task result delivery." });
+                return;
+            }
             if (request.UploadFiles.Count > 0)
             {
                 request.Attachments = await SaveChatAttachmentsAsync(request.Agent, request.Session, request.UploadFiles, context.RequestAborted);
@@ -2919,6 +2934,10 @@ public sealed class WebServer
     private static object SessionDto(SessionData data) => new
     {
         sessionId = data.SessionId,
+        displayTitle = data.DisplayTitle,
+        kind = data.Kind,
+        isReadOnly = data.IsReadOnly,
+        createdByScheduledTaskId = data.CreatedByScheduledTaskId,
         contextUsage = data.ContextUsage,
         totalMessages = data.TotalMessages,
         toolMessagesCount = data.ToolMessagesCount,

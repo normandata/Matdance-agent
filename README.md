@@ -17,6 +17,7 @@ Strong recommendation: read [FULL-DOC.md](FULL-DOC.md). `FULL-DOC.md` and [FULL-
 ## Preview Status
 
 - `v1.1.21-preview` optimizes main conversation context compression. Automatic and manual compaction now estimate the full request budget, preserve the latest three user turns, use segmented downgrade/recovery, keep a one-shot handoff only for the compressed retry, and reuse compacted sidecar summaries on later turns.
+- `v1.1.21-preview` also hardens scheduled tasks. Agent-created tasks now require clearer schedule/timezone/content/delivery confirmation, support dedicated read-only notification sessions, expose real manual test runs for user tasks without advancing the original schedule, and render scheduled-task notification cards with the full subagent Markdown output instead of truncating at internal separators.
 - Fixed in `v1.1.20-hot-fix-2`: skill organization could exceed model context limits or repeatedly fail on one bad evidence range, preventing later conversations from being organized into skills. Skill organization now uses adaptive batch downgrade/recovery, round-based `skill_read` windows, tool-call-only evidence compression, and poison-batch skip after repeated recoverable failures.
 
 ## Contents

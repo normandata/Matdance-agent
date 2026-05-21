@@ -272,6 +272,7 @@ public sealed class SkillIdleValidationWorker
             {
                 var data = JsonSerializer.Deserialize<SessionData>(File.ReadAllText(file), new JsonSerializerOptions(JsonSerializerDefaults.Web));
                 if (data == null) continue;
+                if (data.IsScheduledNotification) continue;
                 if (!latest.HasValue || data.LastActivity > latest.Value)
                     latest = data.LastActivity;
             }

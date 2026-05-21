@@ -72,10 +72,12 @@ public class BookmarkService
 
         foreach (var file in Directory.GetFiles(sessionsDir, "*.json"))
         {
-            if (file.EndsWith(".state.json", StringComparison.OrdinalIgnoreCase)) continue;
-            var sessionId = Path.GetFileNameWithoutExtension(file);
-            var bookmark = GetSkillSessionBookmark(agent, sessionId);
-            var current = inspector.Inspect(agent, sessionId);
+                if (file.EndsWith(".state.json", StringComparison.OrdinalIgnoreCase)) continue;
+                var sessionId = Path.GetFileNameWithoutExtension(file);
+                if (IsScheduledNotificationSession(file))
+                    continue;
+                var bookmark = GetSkillSessionBookmark(agent, sessionId);
+                var current = inspector.Inspect(agent, sessionId);
 
             if (SessionHasPendingChanges(bookmark, current))
                 sessions.Add(BuildPendingSessionBookmark(agent, sessionId, bookmark, current));
@@ -150,6 +152,8 @@ public class BookmarkService
             {
                 if (file.EndsWith(".state.json", StringComparison.OrdinalIgnoreCase)) continue;
                 var sessionId = Path.GetFileNameWithoutExtension(file);
+                if (IsScheduledNotificationSession(file))
+                    continue;
                 var bookmark = GetSessionBookmark(agent, sessionId);
                 var current = inspector.Inspect(agent, sessionId);
 
@@ -236,6 +240,18 @@ public class BookmarkService
 
         var latest = current.EffectiveActivity ?? current.LatestMessageAt;
         return latest.HasValue && IsAfter(latest.Value, bookmark.LastIntegratedAt);
+    }
+
+    private static bool IsScheduledNotificationSession(string file)
+    {
+        try
+        {
+            return SessionData.Load(file).IsScheduledNotification;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static SessionBookmark BuildPendingSessionBookmark(string agent, string sessionId, SessionBookmark? bookmark, SessionActivitySnapshot current)

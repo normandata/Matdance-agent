@@ -1250,6 +1250,13 @@ public static class WebPage
       border-top: 1px solid var(--line);
       background: linear-gradient(180deg, rgba(255,255,255,.035), rgba(5,8,16,.52));
     }
+    .composer.read-only .composer-box {
+      border-color: rgba(100,219,255,.20);
+      background: rgba(5, 9, 18, .56);
+    }
+    .composer.read-only textarea {
+      color: var(--faint);
+    }
     .composer-box {
       display: grid;
       gap: 11px;
@@ -1561,7 +1568,8 @@ public static class WebPage
 .notice-head{display:flex;align-items:center;gap:10px;margin-bottom:10px;}
 .notice-badge{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;border:1px solid rgba(103,247,177,.28);background:rgba(103,247,177,.10);color:var(--green);font-size:11px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;}
 .notice-card .notice-title{font-size:14px;font-weight:700;color:var(--ink);margin-bottom:8px;}
-.notice-card .notice-body{font-size:13px;line-height:1.65;color:var(--soft);}
+.notice-card .notice-body{max-width:100%;overflow-x:auto;font-size:13px;line-height:1.65;color:var(--soft);}
+.notice-card .notice-body table{display:block;max-width:100%;overflow-x:auto;border-collapse:collapse;}
 .notice-time{margin-top:10px;font-size:11px;color:var(--faint);}
 .schedule-rule-editor{display:grid;gap:12px;}
 .schedule-rule-type{display:flex;flex-wrap:wrap;gap:8px;}
@@ -1573,6 +1581,15 @@ public static class WebPage
 .schedule-rule-row input,.schedule-rule-row select{min-height:40px;border-radius:12px;}
 .schedule-rule-chip{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:999px;border:1px solid rgba(100,219,255,.25);background:rgba(100,219,255,.08);color:#c8ecff;font-size:12px;}
 .schedule-rule-chip button{width:auto;min-height:0;padding:0;border:0;background:transparent;color:var(--rose);font-size:14px;line-height:1;cursor:pointer;}
+.schedule-test-overlay{position:fixed;inset:0;z-index:10030;display:none;place-items:center;padding:24px;background:rgba(2,6,14,.72);backdrop-filter:blur(12px);}
+.schedule-test-overlay.active{display:grid;}
+.schedule-test-card{width:min(520px,calc(100vw - 32px));display:grid;gap:13px;padding:20px;border:1px solid rgba(100,219,255,.24);border-radius:22px;background:linear-gradient(180deg,rgba(14,22,40,.96),rgba(6,10,20,.94));box-shadow:0 24px 80px rgba(0,0,0,.42),inset 0 1px 0 rgba(255,255,255,.06);}
+.schedule-test-card strong{font-size:16px;color:var(--ink);}
+.schedule-test-card p{margin:0;color:var(--soft);line-height:1.55;font-size:13px;word-break:break-word;}
+.schedule-test-bar{height:8px;border-radius:999px;overflow:hidden;background:rgba(255,255,255,.08);}
+.schedule-test-bar span{display:block;height:100%;width:36%;border-radius:999px;background:linear-gradient(90deg,var(--green),var(--cyan));box-shadow:0 0 14px rgba(103,247,177,.35);animation:scheduleTestSweep 1.25s ease-in-out infinite;}
+.schedule-test-card small{color:var(--faint);font-size:11px;}
+@keyframes scheduleTestSweep{0%{transform:translateX(-110%);}50%{transform:translateX(70%);}100%{transform:translateX(285%);}}
 
 /* ===== Memory Panel ===== */
 .memory-panel{overflow:hidden;}
@@ -2031,7 +2048,7 @@ public static class WebPage
             <div class="button-row"><button id="scheduleReload" class="ghost" type="button">刷新</button></div>
           </section>
           <section class="control-card schedule-list-card"><div class="schedule-list-head"><strong id="scheduleListTitle">任务列表</strong><span id="schedulePageInfo">-</span></div><div id="scheduleList" class="schedule-list"></div><div class="button-row"><button id="schedulePrev" class="ghost" type="button">上一页</button><button id="scheduleNext" class="ghost" type="button">下一页</button></div></section>
-          <section class="note-card"><strong id="scheduleRuleTitle">投递规则</strong><br /><span id="scheduleRuleText">默认投递到创建会话；可选多个会话或当前Agent全部会话。通知默认不进入主Agent推理上下文。</span></section>
+          <section class="note-card"><strong id="scheduleRuleTitle">投递规则</strong><br /><span id="scheduleRuleText">默认投递到发起任务的当前会话；可选指定会话、当前Agent全部普通会话或专属通知会话。通知默认不进入主Agent推理上下文。</span></section>
         </aside>
         <main class="agent-main">
           <header class="agent-main-head"><div class="title-block"><div class="window-dots"><button id="scheduleWinClose" type="button" title="Back to Home"></button><button id="scheduleWinMin" type="button" title="Back to Home"></button><button id="scheduleWinMax" type="button" title="Fullscreen"></button></div><h2 id="scheduleMainTitle">Scheduled Tasks</h2><p id="scheduleState">选择Agent后加载任务列表。</p></div><span class="phase-pill"><span class="phase-dot"></span><span>low-priority</span></span></header>
@@ -2043,7 +2060,7 @@ public static class WebPage
                 <div class="agent-field"><label for="scheduleStatus"><span id="scheduleLabelStatus">状态</span><span>enabled/paused</span></label><select id="scheduleStatus"><option value="enabled">enabled</option><option value="paused">paused</option></select></div>
                 <div class="agent-field full"><label for="scheduleContent"><span id="scheduleLabelContent">要做的事情</span><span>task</span></label><textarea id="scheduleContent" required placeholder="写清楚任务目标、输入来源、输出要求..."></textarea></div>
                 <div class="agent-field full"><label><span id="scheduleLabelRule">定时规则</span><span>schedule</span></label><div class="schedule-rule-editor"><div class="schedule-rule-type"><button type="button" data-rule-type="daily" class="active" id="scheduleRuleDaily">每天固定时间</button><button type="button" data-rule-type="daily_times" id="scheduleRuleDailyTimes">每天多次</button><button type="button" data-rule-type="daily_window" id="scheduleRuleDailyWindow">每日循环</button><button type="button" data-rule-type="once" id="scheduleRuleOnce">执行一次</button></div><div id="scheduleRuleFields" class="schedule-rule-fields"></div></div><input id="scheduleJson" type="hidden" /></div>
-                <div class="agent-field"><label for="scheduleTargetMode"><span id="scheduleLabelTarget">结果投递</span><span>targets</span></label><select id="scheduleTargetMode"><option value="created_session" id="scheduleOptCreated">创建会话</option><option value="session" id="scheduleOptSession">选择会话</option><option value="all_agent_sessions" id="scheduleOptAll">全部会话</option><option value="none" id="scheduleOptNone">不投递</option></select></div>
+                <div class="agent-field"><label for="scheduleTargetMode"><span id="scheduleLabelTarget">结果投递</span><span>targets</span></label><select id="scheduleTargetMode"><option value="created_session" id="scheduleOptCreated">当前/创建会话</option><option value="session" id="scheduleOptSession">选择会话</option><option value="all_agent_sessions" id="scheduleOptAll">全部普通会话</option><option value="notification_session" id="scheduleOptNotification">Dedicated notification session</option><option value="none" id="scheduleOptNone">不投递</option></select></div>
                 <div class="agent-field"><label for="scheduleTargetSessions"><span id="scheduleLabelSessions">会话列表</span><span>multi</span></label><select id="scheduleTargetSessions" multiple></select></div>
               </div>
               <div class="agent-actions"><button id="scheduleSave" class="primary" type="submit">保存任务</button><button id="scheduleNew" class="ghost" type="button">新建</button></div>
@@ -2418,7 +2435,7 @@ public static class WebPage
       const languages = Array.isArray(navigator.languages) && navigator.languages.length ? navigator.languages : [navigator.language || navigator.userLanguage || ''];
       return languages.some(lang => String(lang || '').toLowerCase().startsWith('zh')) ? 'zh' : 'en';
     }
-    const state = { agents: [], sessions: [], agent: null, session: null, busy: false, abortController: null, matrixTimer: null, commandIndex: 0, activeTab: 'home', settingsSection: 'general', runtimeEventsTimer: null, runtimeEventsAgent: null, schedulePage: 1, schedulePageSize: 8, scheduledTasks: null, scheduledSelected: null, lang: preferredLanguage(), memoryTab: 'core', memoryPage: 1, memoryPageSize: 10, memoryItems: null, memorySelectedItem: null, memorySnapshots: [], memoryVectorAtlas: null, memoryVectorResults: null, memoryVectorHover: null, memoryVectorPinned: null, memoryOrganizing: false, skillsWorking: false, skillsLearnFiles: [], selectedSkillValidationReport: null, selectedSkillImportReport: null, browserOpen: false, browserWs: null, browserMaximized: false, chatNearBottom: true, chatFollowStream: true, chatUserScrollIntentAt: 0, chatProgrammaticScrollUntil: 0, suppressChatAutoScroll: false, chatAttachments: [], multimodal: null, securitySettings: null, skillValidationSettings: null, modelProviders: [], audioPlayer: null, audioUrl: null, audioButton: null, ttsErrorTimer: null, soundCues: null, soundCueGroup: 'flow', soundCuePlayer: null, soundCueQueue: [], soundCuePlaying: false, soundCuePrimed: false, soundCueBlocked: false, soundCueUploadType: null, soundCueSaveTimer: null, soundCueLastPlayedAt: {}, soundCueIdleResolvers: [], scheduledNoticeKeys: new Set(), imageNoticeKeys: new Set(), hostNoticeContinuationRunning: false, recorder: null, recordChunks: [], voiceMode: false, voiceRecording: false, voiceCanceled: false, voiceStartY: 0, voiceStartAt: 0, voiceTimer: null, voiceSession: null, voicePointerId: null, labRecorder: null, labRecordChunks: [] };
+    const state = { agents: [], sessions: [], agent: null, session: null, sessionReadOnly: false, busy: false, abortController: null, matrixTimer: null, commandIndex: 0, activeTab: 'home', settingsSection: 'general', runtimeEventsTimer: null, runtimeEventsAgent: null, schedulePage: 1, schedulePageSize: 8, scheduledTasks: null, scheduledSelected: null, lang: preferredLanguage(), memoryTab: 'core', memoryPage: 1, memoryPageSize: 10, memoryItems: null, memorySelectedItem: null, memorySnapshots: [], memoryVectorAtlas: null, memoryVectorResults: null, memoryVectorHover: null, memoryVectorPinned: null, memoryOrganizing: false, skillsWorking: false, skillsLearnFiles: [], selectedSkillValidationReport: null, selectedSkillImportReport: null, browserOpen: false, browserWs: null, browserMaximized: false, chatNearBottom: true, chatFollowStream: true, chatUserScrollIntentAt: 0, chatProgrammaticScrollUntil: 0, suppressChatAutoScroll: false, chatAttachments: [], multimodal: null, securitySettings: null, skillValidationSettings: null, modelProviders: [], audioPlayer: null, audioUrl: null, audioButton: null, ttsErrorTimer: null, soundCues: null, soundCueGroup: 'flow', soundCuePlayer: null, soundCueQueue: [], soundCuePlaying: false, soundCuePrimed: false, soundCueBlocked: false, soundCueUploadType: null, soundCueSaveTimer: null, soundCueLastPlayedAt: {}, soundCueIdleResolvers: [], scheduledNoticeKeys: new Set(), imageNoticeKeys: new Set(), hostNoticeContinuationRunning: false, recorder: null, recordChunks: [], voiceMode: false, voiceRecording: false, voiceCanceled: false, voiceStartY: 0, voiceStartAt: 0, voiceTimer: null, voiceSession: null, voicePointerId: null, labRecorder: null, labRecordChunks: [] };
     const APP_DESIGN_WIDTH = 1360;
     const APP_DESIGN_HEIGHT = 995;
     function updateAppScale() {
@@ -2529,13 +2546,13 @@ public static class WebPage
     Object.assign(i18n.zh,{tagScheduleName:'Schedule',tagScheduleDescription:'定时任务列表、执行历史、toolcall轨迹和低权重结果通知。',
       scheduleTitle:'定时任务',scheduleSubtitle:'分页管理定时任务；结果是低权重通知，会等待主Agent回合结束后再投递。',scheduleListTitle:'任务列表',scheduleQueueLabel:'QUEUE',scheduleTraceLabel:'TRACE',scheduleTaskSpecLabel:'TASK SPEC',
       scheduleReload:'刷新',schedulePrev:'上一页',scheduleNext:'下一页',scheduleSaveTask:'保存任务',scheduleNewTask:'新建',
-      scheduleDeliveryRule:'投递规则',scheduleDeliveryRuleText:'默认投递到创建会话；可选多个会话或当前Agent全部会话。通知默认不进入主Agent推理上下文。',
+      scheduleDeliveryRule:'投递规则',scheduleDeliveryRuleText:'默认投递到发起任务的当前会话；可选指定会话、当前Agent全部普通会话或专属通知会话。通知默认不进入主Agent推理上下文。',
       scheduleStatusLabel:'状态',scheduleTitleLabel:'标题',scheduleContentLabel:'要做的事情',scheduleScheduleLabel:'定时规则',scheduleTargetsLabel:'结果投递',scheduleSessionsLabel:'会话列表',
-      scheduleTargetCreated:'创建会话',scheduleTargetSession:'选择会话',scheduleTargetAll:'全部会话',scheduleTargetNone:'不投递',
+      scheduleTargetCreated:'当前/创建会话',scheduleTargetSession:'选择会话',scheduleTargetAll:'全部普通会话',scheduleTargetNone:'不投递',
       scheduleRuleDaily:'每天固定时间',scheduleRuleDailyTimes:'每天多次',scheduleRuleDailyWindow:'每日循环',scheduleRuleOnce:'执行一次',
       scheduleStateInit:'选择Agent后加载任务列表。',scheduleStateLoading:'加载中...',scheduleStateNew:'新任务',
       scheduleHistoryTitle:'执行历史',scheduleHistoryEmpty:'暂无执行历史',scheduleHistoryPlaceholder:'选择任务查看历史。',scheduleNoTasks:'暂无任务',
-      scheduleConfirmDelete:'确认删除此定时任务？',scheduleConfirmRun:'确认立即执行一次此任务？',
+      scheduleConfirmDelete:'确认删除此定时任务？',scheduleConfirmRun:'确认立即测试一次此任务？测试会真实执行并投递结果，但不会推进原定 nextRunAt。',
       scheduleStatusEnabled:'已启用',scheduleStatusPaused:'已暂停',scheduleStatusCompleted:'已完成',
       scheduleNextRun:'下次执行',scheduleLastRun:'上次执行',scheduleRunCount:'执行次数',scheduleFailCount:'失败次数',
       memoryTitle:'记忆管理',memorySubtitle:'管理 agent 的核心记忆与长期记忆。',memoryAgentLabel:'记忆归属',
@@ -2552,13 +2569,13 @@ public static class WebPage
       scheduleTitle:'Scheduled Tasks',scheduleSubtitle:'Paginated scheduled task manager. Results are low-weight notices delivered after the main agent turn.',
       scheduleListTitle:'Task List',scheduleQueueLabel:'QUEUE',scheduleTraceLabel:'TRACE',scheduleTaskSpecLabel:'TASK SPEC',
       scheduleReload:'Reload',schedulePrev:'Prev',scheduleNext:'Next',scheduleSaveTask:'Save Task',scheduleNewTask:'New',
-      scheduleDeliveryRule:'Delivery Rules',scheduleDeliveryRuleText:'Default: deliver to the creating session. You can also choose multiple sessions or all sessions of this agent. Notices do NOT enter main agent context by default.',
+      scheduleDeliveryRule:'Delivery Rules',scheduleDeliveryRuleText:'Default: deliver to the current session that creates the task. You can also choose a specific session, all normal sessions of this agent, or a dedicated notification session. Notices do NOT enter main agent context by default.',
       scheduleStatusLabel:'Status',scheduleTitleLabel:'Title',scheduleContentLabel:'Task Content',scheduleScheduleLabel:'Schedule Rule',scheduleTargetsLabel:'Delivery Target',scheduleSessionsLabel:'Sessions',
-      scheduleTargetCreated:'Created Session',scheduleTargetSession:'Select Session',scheduleTargetAll:'All Sessions',scheduleTargetNone:'None',
+      scheduleTargetCreated:'Current/Created Session',scheduleTargetSession:'Select Session',scheduleTargetAll:'All Normal Sessions',scheduleTargetNone:'None',
       scheduleRuleDaily:'Daily at fixed time',scheduleRuleDailyTimes:'Multiple times daily',scheduleRuleDailyWindow:'Daily window',scheduleRuleOnce:'Run once',
       scheduleStateInit:'Select an agent to load tasks.',scheduleStateLoading:'Loading...',scheduleStateNew:'New Task',
       scheduleHistoryTitle:'Execution History',scheduleHistoryEmpty:'No execution history',scheduleHistoryPlaceholder:'Select a task to view history.',scheduleNoTasks:'No tasks yet',
-      scheduleConfirmDelete:'Delete this scheduled task?',scheduleConfirmRun:'Run this task once now?',
+      scheduleConfirmDelete:'Delete this scheduled task?',scheduleConfirmRun:'Test this task now? The test does real work and delivers results, but will not advance the original nextRunAt.',
       scheduleStatusEnabled:'Enabled',scheduleStatusPaused:'Paused',scheduleStatusCompleted:'Completed',
       scheduleNextRun:'Next Run',scheduleLastRun:'Last Run',scheduleRunCount:'Runs',scheduleFailCount:'Fails',
       memoryTitle:'Memory',memorySubtitle:'Manage agent core and long-term memories.',memoryAgentLabel:'Memory Owner',
@@ -2995,6 +3012,34 @@ public static class WebPage
       const table = i18n[state.lang] ?? i18n.zh;
       return table[key] ?? i18n.zh[key] ?? fallback ?? key;
     }
+    Object.assign(i18n.zh,{
+      sessionNoticeSuffix:'\u4e13\u5c5e\u901a\u77e5',
+      sessionReadOnlyHint:'\u8fd9\u662f\u5b9a\u65f6\u4efb\u52a1\u4e13\u5c5e\u901a\u77e5\u4f1a\u8bdd\uff0c\u4ec5\u63a5\u6536\u7ed3\u679c\u6295\u9012\u3002',
+      sessionReadOnlyPlaceholder:'\u53ea\u8bfb\u901a\u77e5\u4f1a\u8bdd',
+      scheduleTargetNotification:'\u4e13\u5c5e\u901a\u77e5\u4f1a\u8bdd',
+      scheduleManualTestLabel:'\u624b\u52a8\u6d4b\u8bd5',
+      noticeTriggerLabel:'\u89e6\u53d1',
+      scheduleSystemTestBlocked:'\u7cfb\u7edf\u5185\u7f6e\u4efb\u52a1\u4e0d\u652f\u6301\u624b\u52a8\u6d4b\u8bd5\u3002',
+      scheduleTestingTitle:'\u6b63\u5728\u6d4b\u8bd5\u5b9a\u65f6\u4efb\u52a1',
+      scheduleTestingStage:'\u6b63\u5728\u83b7\u53d6\u8fd0\u884c\u8fdb\u5ea6...',
+      scheduleTestingDeliver:'\u6d4b\u8bd5\u4f1a\u771f\u5b9e\u6267\u884c\u5e76\u6295\u9012\u7ed3\u679c\uff0c\u4f46\u4e0d\u4f1a\u63a8\u8fdb\u539f\u5b9a nextRunAt\u3002',
+      scheduleTestDone:'\u6d4b\u8bd5\u5b8c\u6210\uff0c\u7ed3\u679c\u5df2\u6309\u4efb\u52a1\u76ee\u6807\u6295\u9012\u3002',
+      scheduleTestFailed:'\u6d4b\u8bd5\u5931\u8d25'
+    });
+    Object.assign(i18n.en,{
+      sessionNoticeSuffix:'Dedicated notice',
+      sessionReadOnlyHint:'This scheduled-task notification session only receives result deliveries.',
+      sessionReadOnlyPlaceholder:'Read-only notification session',
+      scheduleTargetNotification:'Dedicated Notification Session',
+      scheduleManualTestLabel:'Manual test',
+      noticeTriggerLabel:'Trigger',
+      scheduleSystemTestBlocked:'System scheduled tasks cannot be manually tested.',
+      scheduleTestingTitle:'Testing scheduled task',
+      scheduleTestingStage:'Reading run progress...',
+      scheduleTestingDeliver:'This test does real work and delivers results, but does not advance the original nextRunAt.',
+      scheduleTestDone:'Test completed; results were delivered to the configured targets.',
+      scheduleTestFailed:'Test failed'
+    });
 
     const commands = [
       { name: '/new-session', aliases: ['/new'], descriptionKey: 'cmdNewSessionDesc', run: async function() { await createSession(); return t('cmdNewSessionDone'); } },
@@ -3475,14 +3520,36 @@ public static class WebPage
     function setBusy(busy, phase = busy ? 'thinking' : 'idle') {
       state.busy = busy;
       state.phase = phase;
-      $('send').disabled = busy;
+      $('send').disabled = busy || state.sessionReadOnly;
       $('stopResponse').disabled = !busy;
-      $('input').disabled = busy;
+      $('input').disabled = busy || state.sessionReadOnly;
       if (busy && state.voiceMode && !state.voiceRecording) state.voiceMode = false;
       updateVoiceUi();
       $('phase').textContent = phaseLabel(phase);
       if (busy) $('hint').textContent = t('busyHint');
       else renderAttachmentStrip();
+      syncComposerState();
+    }
+
+    function syncComposerState() {
+      const readOnly = !!state.sessionReadOnly;
+      const busy = !!state.busy;
+      if (readOnly && state.voiceMode) state.voiceMode = false;
+      if (readOnly && (state.chatAttachments || []).length) clearChatAttachments();
+      const composer = $('composer');
+      if (composer) composer.classList.toggle('read-only', readOnly);
+      const input = $('input');
+      if (input) {
+        input.disabled = busy || readOnly;
+        input.placeholder = readOnly ? t('sessionReadOnlyPlaceholder') : t('inputPlaceholder');
+      }
+      const send = $('send');
+      if (send) send.disabled = busy || readOnly;
+      const attach = $('attachButton');
+      if (attach) attach.disabled = busy || readOnly;
+      const mic = $('micButton');
+      if (mic) mic.disabled = busy || readOnly;
+      updateVoiceUi();
     }
 
     const CHAT_BOTTOM_THRESHOLD = 82;
@@ -4289,6 +4356,7 @@ public static class WebPage
       setAttr('attachButton', 'aria-label', 'attachFiles');
       if (!state.busy) { renderAttachmentStrip(); $('phase').textContent = t('idle'); }
       else $('phase').textContent = phaseLabel(state.phase);
+      syncComposerState();
       setNodeText('.home-subtitle', t('homeSubtitle'));
       setNodeText('.home-eyebrow', t('homeEyebrow'));
       const controls = document.querySelectorAll('.control-readout span');
@@ -4670,6 +4738,7 @@ public static class WebPage
       setText('scheduleOptCreated', 'scheduleTargetCreated');
       setText('scheduleOptSession', 'scheduleTargetSession');
       setText('scheduleOptAll', 'scheduleTargetAll');
+      setText('scheduleOptNotification', 'scheduleTargetNotification');
       setText('scheduleOptNone', 'scheduleTargetNone');
       setLabel('scheduleTargetSessions', 'scheduleSessionsLabel', 'multi');
       setText('scheduleSave', 'scheduleSaveTask');
@@ -4856,6 +4925,10 @@ public static class WebPage
     }
 
     function addChatAttachmentFiles(fileList) {
+      if (state.sessionReadOnly) {
+        $('hint').textContent = t('sessionReadOnlyHint');
+        return;
+      }
       const files = Array.from(fileList || []);
       if (!files.length) return;
       const next = state.chatAttachments || [];
@@ -4928,7 +5001,7 @@ public static class WebPage
         const empty = document.createElement('span');
         empty.className = 'attachment-empty';
         empty.id = 'hint';
-        empty.textContent = t('filesEmpty');
+        empty.textContent = state.sessionReadOnly ? t('sessionReadOnlyHint') : t('filesEmpty');
         strip.appendChild(empty);
         return;
       }
@@ -8305,6 +8378,7 @@ public static class WebPage
       });
       state.agent = data.agent ?? trimmed;
       state.session = null;
+      state.sessionReadOnly = false;
       await loadAgents(false);
       await loadSessions();
       if (state.activeTab === 'agent') await loadAgentConfig();
@@ -8320,6 +8394,7 @@ public static class WebPage
       if (state.runtimeEventsAgent === deletedAgent) state.runtimeEventsAgent = state.agents[0]?.name ?? null;
       state.agent = state.agents[0]?.name ?? null;
       state.session = null;
+      state.sessionReadOnly = false;
       state.sessions = [];
       await loadAgents();
       if (!state.agent) {
@@ -8366,6 +8441,7 @@ public static class WebPage
         state.agent = null;
         state.runtimeEventsAgent = null;
         state.session = null;
+        state.sessionReadOnly = false;
         state.sessions = [];
         if ($('sessionSelect')) $('sessionSelect').innerHTML = '';
         renderRuntimeEvents({ events: [], summary: {}, remaining: [] });
@@ -8384,6 +8460,26 @@ public static class WebPage
       if (state.activeTab === 'lab') await loadLab();
     }
 
+    function sessionDisplayTitle(session) {
+      return session?.displayTitle || session?.sessionId || session?.id || '';
+    }
+
+    function isNotificationSession(session) {
+      return !!session && (session.isReadOnly || String(session.kind || '').toLowerCase() === 'scheduled_notification');
+    }
+
+    function sessionListLabel(session) {
+      const title = sessionDisplayTitle(session);
+      const suffix = isNotificationSession(session) ? ' [' + t('sessionNoticeSuffix') + ']' : '';
+      return title + suffix + ' - ' + (session.totalMessages || 0) + ' ' + t('messagesShort');
+    }
+
+    function sessionPickerLabel(session) {
+      const title = sessionDisplayTitle(session);
+      const id = session?.sessionId || session?.id || '';
+      return title && id && title !== id ? title + ' - ' + id : (title || id);
+    }
+
     async function loadSessions(options = {}) {
       if (!state.agent) return;
       const opts = typeof options === 'object' ? options : {};
@@ -8393,14 +8489,14 @@ public static class WebPage
       for (const session of state.sessions) {
         const opt = document.createElement('option');
         opt.value = session.id;
-        opt.textContent = session.id + ' · ' + session.totalMessages + ' ' + t('messagesShort');
+        opt.textContent = sessionListLabel(session);
         $('sessionSelect').appendChild(opt);
       }
       if (!state.sessions.length) {
         await createSession();
         return;
       }
-      state.session = state.session || state.sessions[0].id;
+      if (!state.sessions.some(function(session) { return session.id === state.session; })) state.session = state.sessions[0].id;
       $('sessionSelect').value = state.session;
       syncScheduleSessionOptions();
       if (opts.reloadCurrentSession !== false) await loadSession();
@@ -8411,9 +8507,10 @@ public static class WebPage
       if (!selector) return;
       selector.innerHTML = '';
       for (const session of (state.sessions ?? [])) {
+        if (isNotificationSession(session)) continue;
         const opt = document.createElement('option');
         opt.value = session.id;
-        opt.textContent = session.id;
+        opt.textContent = sessionPickerLabel(session);
         selector.appendChild(opt);
       }
     }
@@ -8434,7 +8531,10 @@ public static class WebPage
       updateStats(data.session);
       renderTask(data.activeTask);
       $('title').textContent = agentDisplayName(data.agent.name);
-      $('subtitle').textContent = t('sessionWord') + ' ' + data.session.sessionId;
+      const currentTitle = data.session.displayTitle || data.session.sessionId;
+      $('subtitle').textContent = t('sessionWord') + ' ' + currentTitle + (data.session.isReadOnly ? ' [' + t('sessionNoticeSuffix') + ']' : '');
+      state.sessionReadOnly = !!data.session.isReadOnly;
+      syncComposerState();
       state.lastMessageCount = data.messages?.length ?? 0;
       renderMessages(data.messages);
       state.scheduledNoticeKeys = collectScheduledNoticeKeys(data.messages || []);
@@ -8448,6 +8548,8 @@ public static class WebPage
         try {
           const data = await api(`/api/session?agent=${encodeURIComponent(state.agent)}&session=${encodeURIComponent(state.session)}`);
           const currentCount = data.messages?.length ?? 0;
+          state.sessionReadOnly = !!data.session?.isReadOnly;
+          syncComposerState();
           if (currentCount !== state.lastMessageCount) {
             const noticeKeys = collectScheduledNoticeKeys(data.messages || []);
             const imageNoticeKeys = collectImageNoticeKeys(data.messages || []);
@@ -8748,7 +8850,8 @@ public static class WebPage
       $('scheduleTitle').value = '';
       $('scheduleContent').value = '';
       $('scheduleStatus').value = 'enabled';
-      $('scheduleTargetMode').value = 'created_session';
+      $('scheduleTargetMode').value = state.sessionReadOnly ? 'notification_session' : 'created_session';
+      delete $('scheduleTargetMode').dataset.notificationSessionId;
       $('scheduleJson').value = JSON.stringify({type: 'daily', time: '09:30'});
       parseScheduleJson();
       syncScheduleSessionOptions();
@@ -8809,6 +8912,14 @@ public static class WebPage
       if (taskId === 'sched_system_skill_org') return t('scheduleSystemSkillContent');
       return task?.content || '';
     }
+    function isSystemScheduledTask(taskOrId) {
+      const taskId = typeof taskOrId === 'string' ? taskOrId : String(taskOrId?.taskId || '');
+      return !!(typeof taskOrId === 'object' && taskOrId?.isSystem) || taskId === 'sched_system_memory_org' || taskId === 'sched_system_skill_org';
+    }
+    function findScheduledTaskInState(id) {
+      if (state.scheduledSelected?.task?.taskId === id) return state.scheduledSelected.task;
+      return (state.scheduledTasks?.items || []).find(function(task) { return task.taskId === id; }) || null;
+    }
     function renderScheduledTasks(data) {
       const list = $('scheduleList');
       if (!list) return;
@@ -8866,7 +8977,8 @@ public static class WebPage
         // Actions
         const actions = document.createElement('div');
         actions.className = 'schedule-item-actions';
-        actions.append(makeScheduleAction(t('scheduleActionEdit'), 'edit', task.taskId), makeScheduleAction(t('scheduleActionRead'), 'read', task.taskId), makeScheduleAction(t('scheduleActionTest'), 'do', task.taskId));
+        actions.append(makeScheduleAction(t('scheduleActionEdit'), 'edit', task.taskId), makeScheduleAction(t('scheduleActionRead'), 'read', task.taskId));
+        if (!isSystemScheduledTask(task)) actions.append(makeScheduleAction(t('scheduleActionTest'), 'do', task.taskId));
         if (needsRecovery) actions.append(makeScheduleAction(t('scheduleActionRetry'), 'retry', task.taskId), makeScheduleAction(t('scheduleActionRepairRetry'), 'repair-retry', task.taskId));
         actions.append(makeScheduleAction(t('scheduleActionDelete'), 'delete', task.taskId, 'danger'));
         card.appendChild(actions);
@@ -8889,6 +9001,10 @@ public static class WebPage
       const mode = $('scheduleTargetMode').value;
       if (mode === 'none') return [];
       if (mode === 'all_agent_sessions') return [{ type: 'all_agent_sessions' }];
+      if (mode === 'notification_session') {
+        const sessionId = $('scheduleTargetMode').dataset.notificationSessionId || '';
+        return [sessionId ? { type: 'notification_session', sessionId } : { type: 'notification_session' }];
+      }
       if (mode === 'session') return Array.from($('scheduleTargetSessions').selectedOptions).map(function(option) { return { type: 'session', sessionId: option.value }; });
       return [{ type: 'created_session' }];
     }
@@ -8911,6 +9027,8 @@ public static class WebPage
       parseScheduleJson();
       const targets = task.targets ?? [];
       $('scheduleTargetMode').value = (targets[0]?.type ?? 'none');
+      if (targets[0]?.type === 'notification_session' && targets[0]?.sessionId) $('scheduleTargetMode').dataset.notificationSessionId = targets[0].sessionId;
+      else delete $('scheduleTargetMode').dataset.notificationSessionId;
       syncScheduleSessionOptions();
       for (const option of $('scheduleTargetSessions').options) option.selected = targets.some(function(target) { return target.sessionId === option.value; });
     }
@@ -8929,7 +9047,7 @@ public static class WebPage
         const runStatus = String(run.status || '').toLowerCase();
         const statusClass = (runStatus === 'succeeded' || runStatus === 'success') ? 'success' : (['error','failed','canceled','cancelled','interrupted','stalled'].includes(runStatus)) ? 'error' : 'running';
         status.className = 'schedule-history-status ' + statusClass;
-        status.textContent = formatRunStatus(run.status);
+        status.textContent = (String(run.trigger || '').toLowerCase() === 'manual' ? t('scheduleManualTestLabel') + ' - ' : '') + formatRunStatus(run.status);
         const time = document.createElement('span');
         time.className = 'schedule-history-time';
         const started = formatScheduleDate(run.startedAt, timeZone);
@@ -8994,11 +9112,61 @@ public static class WebPage
       resetScheduleForm();
       await loadScheduledTasks();
     }
+    let scheduleTestPollTimer = null;
+    function setScheduleTestOverlay(active, title, stage, detail) {
+      const overlay = $('scheduleTestOverlay');
+      if (!overlay) return;
+      overlay.classList.toggle('active', !!active);
+      overlay.setAttribute('aria-hidden', active ? 'false' : 'true');
+      if (title && $('scheduleTestTitle')) $('scheduleTestTitle').textContent = title;
+      if (stage && $('scheduleTestStage')) $('scheduleTestStage').textContent = stage;
+      if (detail && $('scheduleTestDetail')) $('scheduleTestDetail').textContent = detail;
+    }
+    function stopScheduleTestPolling() {
+      if (scheduleTestPollTimer) {
+        clearInterval(scheduleTestPollTimer);
+        scheduleTestPollTimer = null;
+      }
+    }
+    async function pollScheduleTestProgress(id) {
+      try {
+        const params = new URLSearchParams({ agent: state.agent, taskId: id, take: 5 });
+        const data = await api('/api/scheduled-task?' + params.toString());
+        const task = data.task || {};
+        const runs = data.runs || [];
+        const activeRun = runs.find(function(run) { return run.runId && run.runId === task.activeRunId; }) || runs[0] || {};
+        const stage = task.activeRunHeartbeatMessage || activeRun.heartbeatMessage || task.activeRunHeartbeatKind || activeRun.heartbeatKind || t('scheduleTestingStage');
+        setScheduleTestOverlay(true, t('scheduleTestingTitle') + ': ' + localizedScheduledTaskTitle(task), stage, t('scheduleTestingDeliver'));
+      } catch {}
+    }
     async function runScheduledTaskOnce(id) {
+      const task = findScheduledTaskInState(id);
+      if (isSystemScheduledTask(task || id)) {
+        setScheduleState(t('scheduleSystemTestBlocked'));
+        return;
+      }
       if (!confirm(t('scheduleConfirmRun'))) return;
-      await api('/api/scheduled-tasks/do?deliver=false', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ agent: state.agent, taskId: id, reason: 'manual-ui-test' }) });
-      await readScheduledTask(id);
-      await loadScheduledTasks();
+      stopScheduleTestPolling();
+      const title = task ? localizedScheduledTaskTitle(task) : id;
+      setScheduleTestOverlay(true, t('scheduleTestingTitle') + ': ' + title, t('scheduleTestingStage'), t('scheduleTestingDeliver'));
+      scheduleTestPollTimer = setInterval(function() { pollScheduleTestProgress(id); }, 1500);
+      pollScheduleTestProgress(id);
+      try {
+        const run = await api('/api/scheduled-tasks/do?deliver=true', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ agent: state.agent, taskId: id, reason: 'manual-ui-test' }) });
+        const ok = String(run?.status || '').toLowerCase() === 'succeeded';
+        setScheduleTestOverlay(true, ok ? t('scheduleTestDone') : t('scheduleTestFailed') + ': ' + (run?.error || run?.status || ''), run?.heartbeatMessage || run?.output || run?.error || '', t('scheduleTestingDeliver'));
+        setScheduleState(ok ? t('scheduleTestDone') : t('scheduleTestFailed'));
+      } catch (err) {
+        setScheduleTestOverlay(true, t('scheduleTestFailed'), err.message || String(err), t('scheduleTestingDeliver'));
+        setScheduleState(t('scheduleTestFailed') + ': ' + (err.message || String(err)));
+      } finally {
+        stopScheduleTestPolling();
+        try {
+          await readScheduledTask(id);
+          await loadScheduledTasks();
+        } catch {}
+        setTimeout(function() { setScheduleTestOverlay(false); }, 1400);
+      }
     }
     async function retryScheduledTask(id) {
       if (!confirm(t('scheduleConfirmRetry'))) return;
@@ -10164,39 +10332,84 @@ public static class WebPage
         updateChatJumpButton();
       }
     }
-    function parseNoticeContent(content) {
-      const lines = content.split('\n').map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; });
-      let title = t('scheduledNotice');
-      let tags = [];
-      let bodyLines = [];
-      let foundDivider = false;
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        if (line.startsWith('## ')) { title = line.slice(3).trim(); continue; }
-        if (line === '---' || line.startsWith('---')) { foundDivider = true; break; }
-        if (/^(任务|状态|Run ID|计划时间|完成时间|补偿原因)[：:]/.test(line)) { tags.push(line); continue; }
-        bodyLines.push(line);
-      }
-      return { title, tags, body: bodyLines.join('\n\n'), foundDivider };
-    }
     function localizeNoticeTitle(title) {
       return title === '定时任务通知' || title === 'Scheduled Task Notice' ? t('scheduledNotice') : title;
     }
-    function localizeNoticeTag(tag) {
-      const match = String(tag || '').match(/^(任务|状态|Run ID|计划时间|完成时间|补偿原因)[：:]\s*(.*)$/);
-      if (!match) return tag;
-      let label = match[1];
-      let value = match[2] || '';
-      if (label === '任务') label = t('noticeTaskLabel');
-      else if (label === '状态') {
-        label = t('noticeStatusLabel');
-        if (value === '成功') value = t('scheduleRunStatusSucceeded');
-        else if (value === '失败') value = t('scheduleRunStatusFailed');
+    function noticeLabelKeyFull(label) {
+      const normalized = String(label || '').trim().toLowerCase().replace(/\s+/g, ' ');
+      const zh = {
+        '\u4efb\u52a1': 'task',
+        '\u72b6\u6001': 'status',
+        '\u8ba1\u5212\u65f6\u95f4': 'scheduled',
+        '\u5b8c\u6210\u65f6\u95f4': 'completed',
+        '\u8865\u507f\u539f\u56e0': 'catchup',
+        '\u89e6\u53d1': 'trigger'
+      };
+      if (zh[normalized]) return zh[normalized];
+      if (normalized === 'task') return 'task';
+      if (normalized === 'status') return 'status';
+      if (normalized === 'run id') return 'run';
+      if (normalized === 'trigger') return 'trigger';
+      if (normalized === 'scheduled at') return 'scheduled';
+      if (normalized === 'completed at') return 'completed';
+      if (normalized === 'catch-up reason' || normalized === 'catch up reason') return 'catchup';
+      return '';
+    }
+    function parseNoticeMetaLineFull(line) {
+      const match = String(line || '').match(/^([^:\uff1a]+)[:\uff1a]\s*(.*)$/);
+      if (!match) return null;
+      const key = noticeLabelKeyFull(match[1]);
+      return key ? { key, raw: line, value: match[2] || '' } : null;
+    }
+    function parseNoticeContentFull(content) {
+      const raw = String(content || '').replace(/\r\n/g, '\n');
+      const withoutFooter = raw.replace(/\n---\s*\nThis is a low-priority notice[\s\S]*$/i, '').trimEnd();
+      let text = withoutFooter;
+      let title = t('scheduledNotice');
+      const titleMatch = text.match(/^##\s+(.+?)\s*\n+/);
+      if (titleMatch) {
+        title = titleMatch[1].trim();
+        text = text.slice(titleMatch[0].length);
       }
-      else if (label === '计划时间') label = t('noticeScheduledAtLabel');
-      else if (label === '完成时间') label = t('noticeCompletedAtLabel');
-      else if (label === '补偿原因') label = t('noticeCatchUpLabel');
-      else label = t('noticeRunIdLabel');
+      const lines = text.split('\n');
+      const tags = [];
+      let bodyStart = 0;
+      let sawMeta = false;
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (!line.trim()) {
+          bodyStart = i + 1;
+          continue;
+        }
+        const meta = parseNoticeMetaLineFull(line.trim());
+        if (!meta) {
+          bodyStart = i;
+          break;
+        }
+        sawMeta = true;
+        tags.push(meta);
+        bodyStart = i + 1;
+      }
+      return { title, tags, body: lines.slice(bodyStart).join('\n').trim() };
+    }
+    function localizeNoticeTagFull(tag) {
+      const item = typeof tag === 'string' ? parseNoticeMetaLineFull(tag) : tag;
+      if (!item) return String(tag || '');
+      let label = item.key;
+      let value = item.value || '';
+      if (item.key === 'task') label = t('noticeTaskLabel');
+      else if (item.key === 'status') {
+        label = t('noticeStatusLabel');
+        value = formatRunStatus(value);
+      }
+      else if (item.key === 'run') label = t('noticeRunIdLabel');
+      else if (item.key === 'trigger') {
+        label = t('noticeTriggerLabel');
+        if (String(value).trim().toLowerCase() === 'manual test') value = t('scheduleManualTestLabel');
+      }
+      else if (item.key === 'scheduled') label = t('noticeScheduledAtLabel');
+      else if (item.key === 'completed') label = t('noticeCompletedAtLabel');
+      else if (item.key === 'catchup') label = t('noticeCatchUpLabel');
       return label + ': ' + value;
     }
     function parseImageNoticeContent(content) {
@@ -10319,7 +10532,7 @@ public static class WebPage
     function renderNoticeCard(content, options = {}) {
       const target = options.target || $('chat');
       if (!target) return;
-      const parsed = parseNoticeContent(content);
+      const parsed = parseNoticeContentFull(content);
       const wrap = document.createElement('div');
       wrap.className = 'message assistant';
       const avatar = document.createElement('div');
@@ -10345,7 +10558,7 @@ public static class WebPage
           const chip = document.createElement('span');
           chip.className = 'schedule-rule-chip';
           chip.style.cssText = 'font-size:11px;padding:3px 8px;border-color:rgba(103,247,177,.22);background:rgba(103,247,177,.08);color:#d9fff0;';
-          chip.textContent = localizeNoticeTag(tag);
+          chip.textContent = localizeNoticeTagFull(tag);
           tagsRow.appendChild(chip);
         });
         head.appendChild(tagsRow);
@@ -10368,8 +10581,8 @@ public static class WebPage
 
       const time = document.createElement('div');
       time.className = 'notice-time';
-      const timeTag = parsed.tags.find(function(t) { return /完成时间[：:]/.test(t); });
-      time.textContent = timeTag ? timeTag.replace(/完成时间[：:]\s*/, '') : new Date().toLocaleString(state.lang === 'zh' ? 'zh-CN' : 'en-US');
+      const completedTag = parsed.tags.find(function(tag) { return tag && tag.key === 'completed'; });
+      time.textContent = completedTag ? completedTag.value : new Date().toLocaleString(state.lang === 'zh' ? 'zh-CN' : 'en-US');
       card.append(head, titleEl, bodyEl, time);
       stack.append(meta, card);
       wrap.append(avatar, stack);
@@ -10378,7 +10591,7 @@ public static class WebPage
     }
 
     async function triggerHostNoticeContinuation() {
-      if (state.hostNoticeContinuationRunning || state.busy || !state.agent || !state.session) return;
+      if (state.hostNoticeContinuationRunning || state.busy || state.sessionReadOnly || !state.agent || !state.session) return;
       state.hostNoticeContinuationRunning = true;
       try {
         await sendMessage('', { continueFromHostNotice: true });
@@ -10683,6 +10896,7 @@ public static class WebPage
     $('agentSelect').addEventListener('change', async (e) => {
       state.agent = e.target.value;
       state.session = null;
+      state.sessionReadOnly = false;
       syncAgentSelectors();
       await loadSessions();
       if (state.activeTab === 'agent') await loadAgentConfig();
@@ -10693,6 +10907,7 @@ public static class WebPage
     $('agentConfigSelect').addEventListener('change', async (e) => {
       state.agent = e.target.value;
       state.session = null;
+      state.sessionReadOnly = false;
       syncAgentSelectors();
       await loadSessions();
       await loadAgentConfig();
@@ -10702,6 +10917,7 @@ public static class WebPage
     $('scheduleAgentSelect').addEventListener('change', async function(e) {
       state.agent = e.target.value;
       state.session = null;
+      state.sessionReadOnly = false;
       syncAgentSelectors();
       await loadSessions();
       await loadScheduledTasks(1);
@@ -10709,6 +10925,7 @@ public static class WebPage
     $('labAgentSelect')?.addEventListener('change', async function() {
       state.agent = this.value;
       state.session = null;
+      state.sessionReadOnly = false;
       syncAgentSelectors();
       await loadSessions();
       await loadLab();
@@ -11134,6 +11351,10 @@ public static class WebPage
       const text = $('input').value.trim();
       const hasAttachments = (state.chatAttachments || []).length > 0;
       if ((!text && !hasAttachments) || !state.agent || !state.session) return;
+      if (state.sessionReadOnly) {
+        $('hint').textContent = t('sessionReadOnlyHint');
+        return;
+      }
       if (await runSlashCommand(text)) return;
       if (state.busy) return;
       $('input').value = '';
@@ -11142,7 +11363,10 @@ public static class WebPage
       catch (err) { stopMatrix(); setBusy(false); addMessage('assistant', `[error] ${err.message}`, assistantMeta()); }
     });
 
-    $('attachButton')?.addEventListener('click', function() { $('chatAttachmentInput')?.click(); });
+    $('attachButton')?.addEventListener('click', function() {
+      if (state.sessionReadOnly) { $('hint').textContent = t('sessionReadOnlyHint'); return; }
+      $('chatAttachmentInput')?.click();
+    });
     $('chatAttachmentInput')?.addEventListener('change', function(event) {
       addChatAttachmentFiles(event.target.files || []);
       event.target.value = '';
@@ -11312,6 +11536,14 @@ public static class WebPage
       <div id="organizePercent" class="organize-percent">0%</div>
       <div id="organizeStage" class="organize-stage">准备中...</div>
       <div id="organizeError" class="organize-error"></div>
+    </div>
+  </div>
+  <div id="scheduleTestOverlay" class="schedule-test-overlay" aria-hidden="true">
+    <div class="schedule-test-card" role="status" aria-live="polite">
+      <strong id="scheduleTestTitle">Testing scheduled task</strong>
+      <p id="scheduleTestStage">Reading run progress...</p>
+      <div class="schedule-test-bar"><span></span></div>
+      <small id="scheduleTestDetail">This test does real work and delivers results.</small>
     </div>
   </div>
 </body>

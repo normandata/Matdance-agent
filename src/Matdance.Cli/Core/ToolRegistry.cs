@@ -28,6 +28,7 @@ public static class ToolRegistry
         {
             tools.AddRange(new[]
             {
+                SessionList(),
                 ScheduledTaskCreate(),
                 ScheduledTaskEdit(),
                 ScheduledTaskList(),
@@ -76,7 +77,7 @@ public static class ToolRegistry
         return new ToolDefinition
         {
             Name = "task_manager",
-            Description = "Manage the current session's active task. Only one task can be in_process at a time.",
+            Description = "Manage the current session's active task checklist only. This is not persistent background scheduling and must not be used for reminders, timers, follow-ups, or repeated/delayed work. Only one task can be in_process at a time.",
             Parameters = new JsonObject
             {
                 ["type"] = "object",
@@ -327,11 +328,30 @@ public static class ToolRegistry
             }
         };
     }
-    private static ToolDefinition ScheduledTaskCreate() => ScheduledTool("scheduled_task_create", "Create a low-priority scheduled task for the current agent. Supports once, interval, after_count, daily, daily_count, daily_window and daily_times.", new JsonArray("title", "content", "schedule"));
+    private static ToolDefinition SessionList()
+    {
+        return new ToolDefinition
+        {
+            Name = "session_list",
+            Description = "List current agent session ids for choosing a scheduled-task delivery target. Read-only and limited to metadata, display titles, kind/read-only flags, and short latest-message previews. Use when the user wants notification in a specific old normal chat session; ask the user to confirm the exact sessionId before creating a task with target type 'session'. If the user wants a new/dedicated notification session, use target type 'notification_session' instead of reusing a listed read-only notification session. Do not use this as broad cross-session memory retrieval.",
+            Parameters = new JsonObject
+            {
+                ["type"] = "object",
+                ["properties"] = new JsonObject
+                {
+                    ["page"] = new JsonObject { ["type"] = "integer", ["description"] = "Page number, default 1" },
+                    ["page_size"] = new JsonObject { ["type"] = "integer", ["description"] = "Items per page, 1-30, default 10" },
+                    ["query"] = new JsonObject { ["type"] = "string", ["description"] = "Optional case-insensitive filter over session id and short previews" }
+                }
+            }
+        };
+    }
+
+    private static ToolDefinition ScheduledTaskCreate() => ScheduledTool("scheduled_task_create", "Create a persistent low-priority scheduled task for the current agent. Use for reminders, follow-ups, delayed actions, repeated checks, and background work after this turn. Do not use task_manager for those. Before creating, confirm timezone, schedule details, task content, and delivery target. Default/\"notify here\" target is created_session; \"notify everywhere/all sessions\" is all_agent_sessions for this agent's normal sessions only; \"new/dedicated notification session\" is notification_session and creates a read-only session titled with the task title; a specific old normal chat session requires confirmed sessionId from session_list. Supports only once, interval, after_count, daily, daily_count, daily_window, and daily_times; if the user asks for unsupported weekly/monthly/weekday/calendar rules, ask for a supported schedule instead of approximating.", new JsonArray("title", "content", "schedule"));
     private static ToolDefinition ScheduledTaskEdit() => ScheduledTool("scheduled_task_edit", "Edit an existing scheduled task when the user explicitly asks to change, pause, resume, retarget, or reschedule it. Do not use this as an automatic repair action after a failure; system maintenance handles repair/retry fallbacks separately.", new JsonArray("task_id"));
     private static ToolDefinition ScheduledTaskList() => ScheduledTool("scheduled_task_list", "List scheduled tasks with pagination.", new JsonArray());
     private static ToolDefinition ScheduledTaskRead() => ScheduledTool("scheduled_task_read", "Read one scheduled task and recent execution history.", new JsonArray("task_id"));
-    private static ToolDefinition ScheduledTaskDo() => ScheduledTool("scheduled_task_do", "Run a scheduled task once for explicit testing; avoid unless user asks.", new JsonArray("task_id"));
+    private static ToolDefinition ScheduledTaskDo() => ScheduledTool("scheduled_task_do", "Run a user-created scheduled task once for explicit testing; avoid unless user asks. The test does real work and delivers results by default, but it does not advance the task's schedule cursor, run count, failure count, backoff, or last scheduled-run fields. System scheduled tasks cannot be tested manually.", new JsonArray("task_id"));
     private static ToolDefinition ScheduledTaskDelete() => ScheduledTool("scheduled_task_delete", "Soft-delete a scheduled task and keep history. Use only when the user explicitly asks to remove or stop the task permanently.", new JsonArray("task_id"));
 
     private static ToolDefinition ScheduledTool(string name, string description, JsonArray required)
@@ -353,7 +373,7 @@ public static class ToolRegistry
                     ["schedule"] = new JsonObject
                     {
                         ["type"] = "object",
-                        ["description"] = "Schedule configuration. MUST include a 'type' field. Examples: {type:'daily',time:'09:30'}, {type:'daily_times',times:['09:00','14:00']}, {type:'once',runAt:'2026-05-08T09:30:00'}, {type:'daily_window',windowStart:'09:00',windowEnd:'18:00',intervalMinutes:60}",
+                        ["description"] = "Schedule configuration. MUST include type-specific required fields. Examples: {type:'daily',time:'09:30'}, {type:'daily_times',times:['09:00','14:00']}, {type:'once',runAt:'2026-05-08T09:30:00'}, {type:'daily_window',windowStart:'09:00',windowEnd:'18:00',intervalMinutes:60}, {type:'interval',startAt:'2026-05-08T09:30:00',intervalMinutes:180}. Unsupported weekly/monthly/weekday/calendar rules must be clarified instead of approximated.",
                         ["properties"] = new JsonObject
                         {
                             ["type"] = new JsonObject { ["type"] = "string", ["enum"] = new JsonArray("once", "interval", "after_count", "daily", "daily_count", "daily_window", "daily_times"), ["description"] = "Required schedule type" },
@@ -381,16 +401,16 @@ public static class ToolRegistry
                             ["type"] = "object",
                             ["properties"] = new JsonObject
                             {
-                                ["type"] = new JsonObject { ["type"] = "string", ["enum"] = new JsonArray("created_session", "session", "all_agent_sessions") },
+                                ["type"] = new JsonObject { ["type"] = "string", ["enum"] = new JsonArray("created_session", "session", "all_agent_sessions", "notification_session") },
                                 ["sessionId"] = new JsonObject { ["type"] = "string", ["description"] = "Required when type is 'session'." }
                             },
                             ["required"] = new JsonArray("type")
                         },
-                        ["description"] = "Delivery targets. Each item: {type:'created_session'|'session'|'all_agent_sessions', sessionId?}. Omit to deliver to created session."
+                        ["description"] = "Delivery targets. Omit to deliver to the session where the task was created. Use {type:'created_session'} for 'notify here/current session'; {type:'notification_session'} to create a read-only dedicated notification session titled with the task title; {type:'all_agent_sessions'} only when the user explicitly asks to notify all normal sessions for this agent; {type:'session',sessionId:'...'} only after the user confirms an exact sessionId from session_list."
                     },
                     ["page"] = new JsonObject { ["type"] = "integer" },
                     ["page_size"] = new JsonObject { ["type"] = "integer" },
-                    ["deliver"] = new JsonObject { ["type"] = "boolean", ["description"] = "For scheduled_task_do only: whether to deliver result to target sessions." }
+                    ["deliver"] = new JsonObject { ["type"] = "boolean", ["description"] = "For scheduled_task_do only: whether to deliver result to target sessions. Defaults to true for manual tests." }
                 },
                 ["required"] = required
             }

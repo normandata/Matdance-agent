@@ -343,12 +343,14 @@ public class ScheduledTaskRunner
     {
         var ok = run.Status == ScheduledTaskRunStatuses.Succeeded;
         var zone = ScheduledTaskService.FindZone(task.TimeZone);
-        var localFinished = run.FinishedAt.HasValue ? TimeZoneInfo.ConvertTime(run.FinishedAt.Value, zone) : (DateTimeOffset?)null;
+        var finishedAt = run.FinishedAt ?? UserTimeZoneService.Now();
+        var localFinished = TimeZoneInfo.ConvertTime(finishedAt, zone);
         var localScheduled = run.Trigger == "manual" ? null : (run.ScheduledAt.HasValue ? TimeZoneInfo.ConvertTime(run.ScheduledAt.Value, zone) : (DateTimeOffset?)null);
-        var timeStr = localFinished?.ToString("yyyy-MM-dd HH:mm:ss zzz") ?? run.FinishedAt?.ToString("yyyy-MM-dd HH:mm:ss zzz") ?? "N/A";
+        var timeStr = localFinished.ToString("yyyy-MM-dd HH:mm:ss zzz");
         var scheduledStr = localScheduled?.ToString("yyyy-MM-dd HH:mm:ss zzz");
         var catchUp = string.IsNullOrWhiteSpace(run.CatchUpReason) ? string.Empty : $"\nCatch-up reason: {run.CatchUpReason}";
-        return $"## Scheduled Task Notice\n\nTask: {task.Title}\nStatus: {(ok ? "Succeeded" : "Failed")}\nRun ID: {run.RunId}\n{(scheduledStr == null ? string.Empty : $"Scheduled at: {scheduledStr}\n")}Completed at: {timeStr}{catchUp}\n\n{(ok ? run.Output : run.Error)}\n\n---\nThis is a low-priority notice. It does not enter the main agent reasoning context by default.";
+        var trigger = string.Equals(run.Trigger, "manual", StringComparison.OrdinalIgnoreCase) ? "Trigger: Manual test\n" : string.Empty;
+        return $"## Scheduled Task Notice\n\nTask: {task.Title}\nStatus: {(ok ? "Succeeded" : "Failed")}\nRun ID: {run.RunId}\n{trigger}{(scheduledStr == null ? string.Empty : $"Scheduled at: {scheduledStr}\n")}Completed at: {timeStr}{catchUp}\n\n{(ok ? run.Output : run.Error)}\n\n---\nThis is a low-priority notice. It does not enter the main agent reasoning context by default.";
     }
 
     private static string BuildExceptionDiagnostic(Exception ex, ScheduledTaskRun run)
