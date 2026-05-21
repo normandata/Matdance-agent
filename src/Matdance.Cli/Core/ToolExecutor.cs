@@ -113,7 +113,7 @@ public partial class ToolExecutor
             "scheduled_task_edit" => ExecuteScheduledTaskEdit(args),
             "scheduled_task_list" => ExecuteScheduledTaskList(args),
             "scheduled_task_read" => ExecuteScheduledTaskRead(args),
-            "scheduled_task_do" => await ExecuteScheduledTaskDoAsync(args, ct),
+            "scheduled_task_do_a_test" or "scheduled_task_do" => await ExecuteScheduledTaskDoAsync(args, ct),
             "scheduled_task_delete" => ExecuteScheduledTaskDelete(args),
             "skill_create" => await ExecuteSkillCreateAsync(args),
             "skill_read" => ExecuteSkillRead(args),
@@ -166,7 +166,8 @@ public partial class ToolExecutor
             return BrowserToolExecutionTimeout;
         if (toolName.Equals("image_generation", StringComparison.OrdinalIgnoreCase)
             || toolName.Equals("text_to_speech", StringComparison.OrdinalIgnoreCase)
-            || toolName.Equals("scheduled_task_do", StringComparison.OrdinalIgnoreCase))
+            || toolName.Equals("scheduled_task_do", StringComparison.OrdinalIgnoreCase)
+            || toolName.Equals("scheduled_task_do_a_test", StringComparison.OrdinalIgnoreCase))
             return LongBackgroundToolExecutionTimeout;
         if (toolName.Equals("web_search", StringComparison.OrdinalIgnoreCase))
             return TimeSpan.FromMinutes(3);

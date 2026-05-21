@@ -25,11 +25,14 @@ public class ScheduledTaskWorker
         while (!ct.IsCancellationRequested)
         {
             var launched = 0;
+            var pollSoon = false;
             try
             {
                 var now = DateTimeOffset.UtcNow;
                 _tasks.RecoverInterruptedRuns(now);
-                launched = await LaunchDueTasksAsync(now, ct);
+                var manual = await LaunchManualRunsAsync(ct);
+                launched = manual.Launched + await LaunchDueTasksAsync(now, ct);
+                pollSoon = manual.HadQueued;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -40,9 +43,34 @@ public class ScheduledTaskWorker
                 // Agent deletion can race with a due-task snapshot. The next poll reloads from disk.
             }
 
-            try { await Task.Delay(launched > 0 ? TimeSpan.FromSeconds(2) : TimeSpan.FromSeconds(15), ct); }
+            try { await Task.Delay(launched > 0 || pollSoon ? TimeSpan.FromSeconds(2) : TimeSpan.FromSeconds(15), ct); }
             catch (OperationCanceledException) { }
         }
+    }
+
+    private async Task<(int Launched, bool HadQueued)> LaunchManualRunsAsync(CancellationToken ct)
+    {
+        var queuedTasks = _tasks.GetQueuedManualRuns()
+            .OrderBy(task => task.ManualRunQueuedAt ?? DateTimeOffset.MinValue)
+            .ThenByDescending(BackgroundWorkCoordinator.GetScheduledTaskPriority)
+            .ThenBy(task => task.Agent, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(task => task.TaskId, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var launched = 0;
+        foreach (var queued in queuedTasks)
+        {
+            if (ct.IsCancellationRequested) break;
+
+            var resourceLease = await TryAcquireTaskResourceAsync(queued, TimeSpan.Zero, ct);
+            if (resourceLease == null && BackgroundWorkCoordinator.GetScheduledTaskResourceKey(queued) != null)
+                continue;
+
+            if (await TryLaunchManualTaskAsync(queued, resourceLease, ct))
+                launched++;
+        }
+
+        return (launched, queuedTasks.Count > 0);
     }
 
     private async Task<int> LaunchDueTasksAsync(DateTimeOffset now, CancellationToken ct)
@@ -93,6 +121,28 @@ public class ScheduledTaskWorker
         return launched;
     }
 
+    private async Task<bool> TryLaunchManualTaskAsync(ScheduledTaskItem queued, IDisposable? resourceLease, CancellationToken ct)
+    {
+        var budgetLease = await _work.TryAcquireBudgetAsync(queued.Agent, TimeSpan.Zero, ct);
+        if (budgetLease == null)
+        {
+            resourceLease?.Dispose();
+            return false;
+        }
+
+        var reason = queued.ManualRunReason;
+        var task = _tasks.TryStartRun(queued.Agent, queued.TaskId, manual: true, catchUpReason: reason);
+        if (task == null)
+        {
+            resourceLease?.Dispose();
+            budgetLease.Dispose();
+            return false;
+        }
+
+        StartRun(task, queued, null, "manual", reason, queued.ManualRunDeliver, budgetLease, resourceLease, ct);
+        return true;
+    }
+
     private async Task<bool> TryLaunchDueTaskAsync(ScheduledTaskItem due, IDisposable? resourceLease, CancellationToken ct)
     {
         var budgetLease = await _work.TryAcquireBudgetAsync(due.Agent, TimeSpan.Zero, ct);
@@ -114,11 +164,11 @@ public class ScheduledTaskWorker
             return false;
         }
 
-        StartRun(task, due, scheduledAt, trigger, reason, budgetLease, resourceLease, ct);
+        StartRun(task, due, scheduledAt, trigger, reason, true, budgetLease, resourceLease, ct);
         return true;
     }
 
-    private void StartRun(ScheduledTaskItem task, ScheduledTaskItem due, DateTimeOffset? scheduledAt, string trigger, string? catchUpReason, IDisposable budgetLease, IDisposable? resourceLease, CancellationToken hostCt)
+    private void StartRun(ScheduledTaskItem task, ScheduledTaskItem due, DateTimeOffset? scheduledAt, string trigger, string? catchUpReason, bool deliver, IDisposable budgetLease, IDisposable? resourceLease, CancellationToken hostCt)
     {
         _ = Task.Run(async () =>
         {
@@ -137,7 +187,7 @@ public class ScheduledTaskWorker
                 });
                 try
                 {
-                    var run = await _runner.ExecuteAsync(task, trigger, scheduledAt, true, linked.Token, catchUpReason);
+                    var run = await _runner.ExecuteAsync(task, trigger, scheduledAt, deliver, linked.Token, catchUpReason);
                     if (stalled)
                         MarkRunStalled(run, stallDiagnostic);
                     _tasks.FinishRun(run);

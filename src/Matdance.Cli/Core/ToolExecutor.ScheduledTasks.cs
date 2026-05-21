@@ -115,62 +115,23 @@ public partial class ToolExecutor
         var service = new ScheduledTaskService(_path);
         var taskId = RequiredString(args, "task_id");
         var deliver = BoolArg(args, "deliver", true);
-        IDisposable? resourceLease = null;
-        IDisposable? budgetLease = null;
-        BackgroundBudgetCancellation? budgetCts = null;
-        CancellationTokenSource? linked = null;
-        var taskInfo = service.Read(_agentName, taskId);
-        if (taskInfo.IsSystem)
-            return $"[error] System scheduled task {taskId} cannot be manually tested.";
-        if (_backgroundWork != null)
+        var reason = OptionalString(args, "reason") ?? "Manual test requested by the main agent.";
+        var task = service.QueueManualRun(_agentName, taskId, deliver, reason);
+        var result = new
         {
-            var resource = BackgroundWorkCoordinator.GetScheduledTaskResourceKey(taskInfo);
-            if (resource != null)
-            {
-                resourceLease = await _backgroundWork.TryAcquireResourceAsync(_agentName, resource, BackgroundWorkCoordinator.ResourceRetryTimeout, ct);
-                if (resourceLease == null)
-                    return $"[busy] Scheduled task {taskId} is waiting for the {resource} resource lock. Try again later.";
-            }
-
-            budgetLease = await _backgroundWork.TryAcquireBudgetAsync(_agentName, TimeSpan.Zero, ct);
-            if (budgetLease == null)
-            {
-                resourceLease?.Dispose();
-                return $"[busy] Scheduled task {taskId} needs one extra background budget slot. Increase max_concurrency or retry after the current work finishes.";
-            }
-
-            budgetCts = _backgroundWork.CreateBudgetCancellation(_agentName, ct);
-            linked = _backgroundWork.CreateAgentLinkedCancellation(_agentName, budgetCts.Token);
-        }
-
-        var task = service.TryStartRun(_agentName, taskId, manual: true);
-        if (task == null)
-        {
-            linked?.Dispose();
-            budgetCts?.Dispose();
-            budgetLease?.Dispose();
-            resourceLease?.Dispose();
-            return $"[error] Scheduled task {taskId} is not available or already running.";
-        }
-
-        var bookmarks = new BookmarkService(_path);
-        var memoryOrg = new MemoryOrganizationService(_path, service, bookmarks);
-        var skillMaintenance = new SkillMaintenanceService(_path);
-        var runner = new ScheduledTaskRunner(_path, service, memoryOrg, skillMaintenance, backgroundWork: _backgroundWork);
-        try
-        {
-            var run = await runner.ExecuteAsync(task, "manual", null, deliver, linked?.Token ?? ct);
-            service.FinishRun(run);
-            var delivery = deliver ? string.Join(", ", run.DeliveryResults.Select(item => item.SessionId + ":" + item.Status)) : "suppressed for test";
-            return $"[scheduled_task_do] Run {run.RunId} {run.Status}. Delivery: {delivery}.\n{run.Output ?? run.Error}";
-        }
-        finally
-        {
-            linked?.Dispose();
-            budgetCts?.Dispose();
-            budgetLease?.Dispose();
-            resourceLease?.Dispose();
-        }
+            tool = "scheduled_task_do_a_test",
+            status = "queued",
+            taskId = task.TaskId,
+            title = task.Title,
+            queuedAt = task.ManualRunQueuedAt,
+            deliver,
+            priority = "highest_scheduled_task_priority",
+            message = deliver
+                ? "Manual test queued. It will start after the current main-agent turn releases agent concurrency budget, then deliver the full result to the configured target session(s)."
+                : "Manual test queued. It will start after the current main-agent turn releases agent concurrency budget; delivery is disabled for this test."
+        };
+        await Task.CompletedTask;
+        return JsonSerializer.Serialize(result, new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true });
     }
 
     private string ExecuteScheduledTaskDelete(Dictionary<string, JsonElement> args)

@@ -351,7 +351,7 @@ public static class ToolRegistry
     private static ToolDefinition ScheduledTaskEdit() => ScheduledTool("scheduled_task_edit", "Edit an existing scheduled task when the user explicitly asks to change, pause, resume, retarget, or reschedule it. Do not use this as an automatic repair action after a failure; system maintenance handles repair/retry fallbacks separately.", new JsonArray("task_id"));
     private static ToolDefinition ScheduledTaskList() => ScheduledTool("scheduled_task_list", "List scheduled tasks with pagination.", new JsonArray());
     private static ToolDefinition ScheduledTaskRead() => ScheduledTool("scheduled_task_read", "Read one scheduled task and recent execution history.", new JsonArray("task_id"));
-    private static ToolDefinition ScheduledTaskDo() => ScheduledTool("scheduled_task_do", "Run a user-created scheduled task once for explicit testing; avoid unless user asks. The test does real work and delivers results by default, but it does not advance the task's schedule cursor, run count, failure count, backoff, or last scheduled-run fields. System scheduled tasks cannot be tested manually.", new JsonArray("task_id"));
+    private static ToolDefinition ScheduledTaskDo() => ScheduledTool("scheduled_task_do_a_test", "Queue a user-created scheduled task to run once for explicit testing; avoid unless user asks for a test or dry run. This queues at highest scheduled-task priority instead of running inside the main agent turn, so it can start after the current conversation releases concurrency budget. The test does real work and delivers results by default, but it does not advance the task's schedule cursor, run count, failure count, backoff, or last scheduled-run fields. System scheduled tasks cannot be tested manually.", new JsonArray("task_id"));
     private static ToolDefinition ScheduledTaskDelete() => ScheduledTool("scheduled_task_delete", "Soft-delete a scheduled task and keep history. Use only when the user explicitly asks to remove or stop the task permanently.", new JsonArray("task_id"));
 
     private static ToolDefinition ScheduledTool(string name, string description, JsonArray required)
@@ -410,7 +410,8 @@ public static class ToolRegistry
                     },
                     ["page"] = new JsonObject { ["type"] = "integer" },
                     ["page_size"] = new JsonObject { ["type"] = "integer" },
-                    ["deliver"] = new JsonObject { ["type"] = "boolean", ["description"] = "For scheduled_task_do only: whether to deliver result to target sessions. Defaults to true for manual tests." }
+                    ["deliver"] = new JsonObject { ["type"] = "boolean", ["description"] = "For scheduled_task_do_a_test only: whether to deliver result to target sessions. Defaults to true for manual tests." },
+                    ["reason"] = new JsonObject { ["type"] = "string", ["description"] = "Optional reason for the queued manual test." }
                 },
                 ["required"] = required
             }

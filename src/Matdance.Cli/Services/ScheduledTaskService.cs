@@ -95,6 +95,7 @@ public class ScheduledTaskService
             task.RunState = ScheduledTaskRunStates.Idle;
             task.NextRunAt = null;
             ClearActiveRun(task);
+            ClearQueuedManualRun(task);
             task.UpdatedAt = UserTimeZoneService.Now();
             SaveCore(agent, tasks);
             return Clone(task);
@@ -194,6 +195,56 @@ public class ScheduledTaskService
         return due.OrderBy(item => item.NextRunAt).ToList();
     }
 
+    public IReadOnlyList<ScheduledTaskItem> GetQueuedManualRuns()
+    {
+        var queued = new List<ScheduledTaskItem>();
+        if (!Directory.Exists(_path.AgentsRoot)) return queued;
+        lock (Gate)
+        {
+            foreach (var dir in Directory.GetDirectories(_path.AgentsRoot))
+            {
+                var agent = Path.GetFileName(dir);
+                if (string.IsNullOrWhiteSpace(agent)) continue;
+                queued.AddRange(LoadCore(agent)
+                    .Where(item =>
+                        item.ManualRunQueued &&
+                        !item.IsSystem &&
+                        item.RunState != ScheduledTaskRunStates.Running &&
+                        IsVisibleStatus(item.Status))
+                    .Select(Clone));
+            }
+        }
+        return queued
+            .OrderBy(item => item.ManualRunQueuedAt ?? DateTimeOffset.MinValue)
+            .ThenBy(item => item.Agent, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(item => item.TaskId, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    public ScheduledTaskItem QueueManualRun(string agent, string taskId, bool deliver = true, string? reason = null)
+    {
+        agent = RequireAgent(agent);
+        lock (Gate)
+        {
+            var tasks = LoadCore(agent);
+            var task = FindVisibleTask(tasks, taskId) ?? throw new InvalidOperationException("Scheduled task not found.");
+            if (task.IsSystem)
+                throw new InvalidOperationException("System scheduled tasks cannot be manually tested.");
+            if (task.RunState == ScheduledTaskRunStates.Running)
+                throw new InvalidOperationException("Scheduled task is already running.");
+
+            var now = UserTimeZoneService.Now();
+            task.ManualRunQueued = true;
+            task.ManualRunQueuedAt ??= now;
+            task.ManualRunDeliver = deliver;
+            task.ManualRunReason = Trim(string.IsNullOrWhiteSpace(reason) ? "Manual test queued by the main agent." : reason.Trim(), 500);
+            task.UpdatedAt = now;
+            SaveCore(agent, tasks);
+            _events.Record(agent, "scheduled_task", NewId("manual_test"), task.TaskId, "manual_test_queued", "Manual test queued at highest scheduled-task priority.", "wait_for_idle");
+            return Clone(task);
+        }
+    }
+
     public void RecoverInterruptedRuns(DateTimeOffset now)
     {
         if (!Directory.Exists(_path.AgentsRoot)) return;
@@ -250,6 +301,8 @@ public class ScheduledTaskService
             task.ActiveRunHeartbeatKind = "started";
             task.ActiveRunHeartbeatMessage = "Execution lease acquired and persisted.";
             task.StalledUntil = null;
+            if (manual)
+                ClearQueuedManualRun(task);
             task.UpdatedAt = userNow;
 
             var run = new ScheduledTaskRun
@@ -424,6 +477,7 @@ public class ScheduledTaskService
             old.RepairReason = repairReason;
             old.UpdatedAt = now;
             ClearActiveRun(old);
+            ClearQueuedManualRun(old);
 
             repaired.TaskId = originalTaskId;
             repaired.Status = ScheduledTaskStatuses.Enabled;
@@ -438,6 +492,7 @@ public class ScheduledTaskService
             repaired.RepairReason = repairReason;
             repaired.StalledUntil = null;
             ClearActiveRun(repaired);
+            ClearQueuedManualRun(repaired);
             RepairTaskShape(repaired, DateTimeOffset.UtcNow, notes);
             repaired.NextRunAt = DateTimeOffset.UtcNow.AddSeconds(-1);
 
@@ -1161,6 +1216,14 @@ public class ScheduledTaskService
         task.ActiveRunLastHeartbeatAt = null;
         task.ActiveRunHeartbeatKind = null;
         task.ActiveRunHeartbeatMessage = null;
+    }
+
+    private static void ClearQueuedManualRun(ScheduledTaskItem task)
+    {
+        task.ManualRunQueued = false;
+        task.ManualRunQueuedAt = null;
+        task.ManualRunDeliver = true;
+        task.ManualRunReason = null;
     }
 
     private static string BuildStallDiagnostic(ScheduledTaskItem task, DateTimeOffset now, DateTimeOffset lastHeartbeat)
