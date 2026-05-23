@@ -41,6 +41,7 @@ public static class ToolRegistry
         tools.AddRange(new[] { SkillCreate(), SkillRead(), SkillEditor(), SkillDelete() });
         tools.Add(ImageGenerationListProfiles());
         tools.Add(ImageGeneration());
+        tools.Add(ImageEdit());
         tools.Add(ImageGenerationShowProcess());
         tools.Add(ImageGenerationCancel());
         tools.Add(ImageGenerationRetry());
@@ -423,7 +424,7 @@ public static class ToolRegistry
         return new ToolDefinition
         {
             Name = "skill_create",
-            Description = "Create a new skill for practiced, confirmed, reusable workflows, domain best practices, or vertical expertise. Skills persist across sessions and help maintain consistency. Content should be reproducible and include when to use it, preconditions, workflow, tools/parameters, expected outputs, failure handling, and boundaries. Do not create skills from guesses, promises, future plans, ordinary chat summaries, private-data access patterns, credential handling, or unverified commands/configurations.",
+            Description = "Create a new skill for practiced, confirmed, reusable workflows, domain best practices, or vertical expertise. Skills persist across sessions and help maintain consistency. Content should be reproducible and include when to use it, preconditions, exact workflow, tools/parameters, expected outputs, failure handling, and boundaries. If the skill needs a script, template, example, config, or reusable resource, include it in resource_files and reference it from content with a skill-local path such as ./scripts/name.py. Do not create skills from guesses, promises, future plans, ordinary chat summaries, private-data access patterns, credential handling, or unverified commands/configurations.",
             Parameters = new JsonObject
             {
                 ["type"] = "object",
@@ -432,7 +433,8 @@ public static class ToolRegistry
                     ["name"] = new JsonObject { ["type"] = "string", ["description"] = "Skill name (max 50 chars)" },
                     ["description"] = new JsonObject { ["type"] = "string", ["description"] = "Brief description of what this skill covers (max 300 chars)" },
                     ["tags"] = new JsonObject { ["type"] = "array", ["items"] = new JsonObject { ["type"] = "string" }, ["description"] = "Optional tags for categorization" },
-                    ["content"] = new JsonObject { ["type"] = "string", ["description"] = "Full reproducible skill content. Include sections for When to Use, Preconditions, Workflow, Tools and Parameters, Expected Outputs, Failure Handling, and Boundaries when applicable." }
+                    ["content"] = new JsonObject { ["type"] = "string", ["description"] = "Full reproducible skill content. Include sections for When to Use, Preconditions, Workflow, Tools and Parameters, Expected Outputs, Failure Handling, and Boundaries when applicable. Reference any resource_files by exact skill-local paths." },
+                    ["resource_files"] = SkillResourceFilesSchema()
                 },
                 ["required"] = new JsonArray("name", "description", "content")
             }
@@ -462,7 +464,7 @@ public static class ToolRegistry
         return new ToolDefinition
         {
             Name = "skill_editor",
-            Description = "Edit an existing skill to update its content, description, or tags after completing a workflow or discovering confirmed improvements. Keep content reproducible: when to use it, preconditions, workflow, tools/parameters, expected outputs, failure handling, and boundaries. Do not turn guesses, promises, future plans, ordinary chat summaries, private-data access patterns, credential handling, or unverified commands/configurations into durable skill instructions.",
+            Description = "Edit an existing skill to update its content, description, tags, or skill-local resource files after completing a workflow or discovering confirmed improvements. Keep content reproducible: when to use it, preconditions, workflow, tools/parameters, expected outputs, failure handling, boundaries, and exact references to any resource_files. Do not turn guesses, promises, future plans, ordinary chat summaries, private-data access patterns, credential handling, or unverified commands/configurations into durable skill instructions.",
             Parameters = new JsonObject
             {
                 ["type"] = "object",
@@ -472,9 +474,29 @@ public static class ToolRegistry
                     ["name"] = new JsonObject { ["type"] = "string", ["description"] = "New name (optional)" },
                     ["description"] = new JsonObject { ["type"] = "string", ["description"] = "New description (optional)" },
                     ["tags"] = new JsonObject { ["type"] = "array", ["items"] = new JsonObject { ["type"] = "string" }, ["description"] = "New tags (optional)" },
-                    ["content"] = new JsonObject { ["type"] = "string", ["description"] = "New full content (optional)" }
+                    ["content"] = new JsonObject { ["type"] = "string", ["description"] = "New full content (optional). Reference any resource_files by exact skill-local paths." },
+                    ["resource_files"] = SkillResourceFilesSchema()
                 },
                 ["required"] = new JsonArray("skill_id")
+            }
+        };
+    }
+
+    private static JsonObject SkillResourceFilesSchema()
+    {
+        return new JsonObject
+        {
+            ["type"] = "array",
+            ["description"] = "Optional skill-local text resources required by the skill, such as scripts, templates, examples, config snippets, or reusable text. Paths must be relative and under ./scripts/, ./templates/, ./resources/, ./assets/, ./examples/, ./config/, or ./configs/. Do not include absolute paths, parent traversal, workspace paths, secrets, binaries, or generated logs.",
+            ["items"] = new JsonObject
+            {
+                ["type"] = "object",
+                ["properties"] = new JsonObject
+                {
+                    ["path"] = new JsonObject { ["type"] = "string", ["description"] = "Skill-local relative path, e.g. ./scripts/example.py" },
+                    ["content"] = new JsonObject { ["type"] = "string", ["description"] = "Full text content for the resource file." }
+                },
+                ["required"] = new JsonArray("path", "content")
             }
         };
     }
@@ -518,6 +540,32 @@ public static class ToolRegistry
                     ["output_path"] = new JsonObject { ["type"] = "string", ["description"] = "Optional workspace-relative output file or directory path" }
                 },
                 ["required"] = new JsonArray("prompt")
+            }
+        };
+    }
+
+    private static ToolDefinition ImageEdit()
+    {
+        return new ToolDefinition
+        {
+            Name = "image_edit",
+            Description = "Start a host-managed image edit job through the configured OpenAI-compatible image model profiles. Upload exactly one existing local image by source_image_path and apply a concise edit prompt. Main-agent calls are asynchronous; scheduled-task/subagent calls may run synchronously by host policy. Use image_generation_show_process for authoritative status, final files, provider fallback, and errors. Keep prompt concise with the same limits as image_generation: normally 1-30 characters; use 31-50 only when explicitly required or impossible to shorten.",
+            Parameters = new JsonObject
+            {
+                ["type"] = "object",
+                ["properties"] = new JsonObject
+                {
+                    ["profile"] = new JsonObject { ["type"] = "string", ["description"] = "Optional image model profile id/name. Omit to use the configured default/auto profile order." },
+                    ["batch_id"] = new JsonObject { ["type"] = "string", ["description"] = "Optional batch id shared by related image jobs." },
+                    ["source_image_path"] = new JsonObject { ["type"] = "string", ["description"] = "Existing local image to edit. Must resolve inside the agent workspace or browser_temp and be png, jpg, jpeg, or webp." },
+                    ["prompt"] = new JsonObject { ["type"] = "string", ["description"] = "Concise edit prompt. Normally 1-30 characters. Use 31-50 only when explicitly required or impossible to shorten." },
+                    ["size"] = new JsonObject { ["type"] = "string", ["description"] = "Optional output image size, for example 1024x1024, 1024x1536, 1536x1024" },
+                    ["quality"] = new JsonObject { ["type"] = "string", ["description"] = "Optional provider quality setting, for example auto, low, medium, high, standard, hd" },
+                    ["output_format"] = new JsonObject { ["type"] = "string", ["description"] = "Optional output format, usually png, jpeg, or webp" },
+                    ["count"] = new JsonObject { ["type"] = "integer", ["description"] = "Number of edited images to produce, 1-4", ["default"] = 1 },
+                    ["output_path"] = new JsonObject { ["type"] = "string", ["description"] = "Optional workspace-relative output file or directory path" }
+                },
+                ["required"] = new JsonArray("source_image_path", "prompt")
             }
         };
     }

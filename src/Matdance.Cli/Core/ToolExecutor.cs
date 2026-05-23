@@ -121,6 +121,7 @@ public partial class ToolExecutor
             "skill_delete" => await ExecuteSkillDeleteAsync(args),
             "image_generation_list_profiles" => ExecuteImageGenerationListProfiles(),
             "image_generation" => await ExecuteImageGenerationAsync(args, ct),
+            "image_edit" => await ExecuteImageEditAsync(args, ct),
             "image_generation_show_process" => ExecuteImageGenerationShowProcess(args),
             "image_generation_cancel" => ExecuteImageGenerationCancel(args),
             "image_generation_retry" => ExecuteImageGenerationRetry(args),
@@ -165,6 +166,7 @@ public partial class ToolExecutor
             || toolName.Equals("browser_apply_cookie", StringComparison.OrdinalIgnoreCase))
             return BrowserToolExecutionTimeout;
         if (toolName.Equals("image_generation", StringComparison.OrdinalIgnoreCase)
+            || toolName.Equals("image_edit", StringComparison.OrdinalIgnoreCase)
             || toolName.Equals("text_to_speech", StringComparison.OrdinalIgnoreCase)
             || toolName.Equals("scheduled_task_do", StringComparison.OrdinalIgnoreCase)
             || toolName.Equals("scheduled_task_do_a_test", StringComparison.OrdinalIgnoreCase))
@@ -1425,7 +1427,8 @@ public partial class ToolExecutor
                 Name = RequiredString(args, "name"),
                 Description = RequiredString(args, "description"),
                 Tags = OptionalStringArray(args, "tags"),
-                Content = RequiredString(args, "content")
+                Content = RequiredString(args, "content"),
+                ResourceFiles = OptionalSkillResourceFiles(args)
             };
             var skill = service.Create(_agentName, request);
             return $"[skill_create] Created skill '{skill.Name}' (ID: {skill.Id}). Use skill_read(skill_id='{skill.Id}') to load it.";
@@ -1440,7 +1443,8 @@ public partial class ToolExecutor
         var skillDir = _path.GetSkillPath(_agentName, skillId);
         var tags = skill.Tags.Count > 0 ? $"Tags: {string.Join(", ", skill.Tags)}\n" : "";
         var reports = SkillValidationState.BuildSkillReportContext(skillDir, detailed: true);
-        return $"## Skill: {skill.Name}\n\n{tags}{skill.Content}\n\n---\n## Skill Reports\n\n{reports}\n\n---\n[skill_read] Loaded skill '{skill.Name}' (ID: {skill.Id}) with current validation/import notes.";
+        var resources = BuildSkillResourceReadContext(skillDir);
+        return $"## Skill: {skill.Name}\n\n{tags}{skill.Content}\n\n---\n## Skill Resources\n\n{resources}\n\n---\n## Skill Reports\n\n{reports}\n\n---\n[skill_read] Loaded skill '{skill.Name}' (ID: {skill.Id}) with current validation/import notes and skill-local resource inventory.";
     }
 
     private async Task<string> ExecuteSkillEditorAsync(Dictionary<string, JsonElement> args)
@@ -1454,7 +1458,8 @@ public partial class ToolExecutor
                 Name = OptionalString(args, "name"),
                 Description = OptionalString(args, "description"),
                 Tags = OptionalStringArray(args, "tags"),
-                Content = OptionalString(args, "content")
+                Content = OptionalString(args, "content"),
+                ResourceFiles = OptionalSkillResourceFiles(args)
             };
             var skill = service.Edit(_agentName, request);
             return $"[skill_editor] Updated skill '{skill.Name}' (ID: {skill.Id}). Updated at {UserTimeZoneService.ToUserTime(skill.UpdatedAt):yyyy-MM-dd HH:mm:ss zzz}.";
@@ -1487,6 +1492,81 @@ public partial class ToolExecutor
             return "[blocked] The skills resource is busy for this agent. Retry after the current skill organization, validation, or edit finishes.";
 
         return action();
+    }
+
+    private static List<SkillResourceFile>? OptionalSkillResourceFiles(Dictionary<string, JsonElement> args)
+    {
+        if (!TryArg(args, "resource_files", out var element) || element.ValueKind != JsonValueKind.Array)
+            return null;
+
+        var resources = new List<SkillResourceFile>();
+        foreach (var item in element.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object)
+                continue;
+            var path = OptionalObjectString(item, "path");
+            if (string.IsNullOrWhiteSpace(path))
+                continue;
+            var content = OptionalObjectString(item, "content");
+            resources.Add(new SkillResourceFile { Path = path, Content = content });
+        }
+
+        return resources.Count == 0 ? null : resources;
+    }
+
+    private static string BuildSkillResourceReadContext(string skillDir)
+    {
+        if (!Directory.Exists(skillDir))
+            return "No skill directory found.";
+
+        var allowedRoots = new[] { "scripts", "templates", "resources", "assets", "examples", "config", "configs" };
+        var files = allowedRoots
+            .Select(root => Path.Combine(skillDir, root))
+            .Where(Directory.Exists)
+            .SelectMany(root => Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .Take(80)
+            .ToList();
+
+        if (files.Count == 0)
+            return "No skill-local resources found.";
+
+        var sb = new StringBuilder();
+        var normalizedSkillDir = EnsureTrailingSeparator(Path.GetFullPath(skillDir));
+        foreach (var file in files)
+        {
+            try
+            {
+                var info = new FileInfo(file);
+                var relative = "./" + Path.GetRelativePath(normalizedSkillDir, file).Replace(Path.DirectorySeparatorChar, '/');
+                sb.AppendLine($"- `{relative}` ({info.Length} bytes)");
+                if (info.Length <= 20000 && LooksLikeTextResource(file))
+                {
+                    var content = File.ReadAllText(file);
+                    var preview = content.Length > 4000 ? content[..4000] + "\n...[truncated]" : content;
+                    sb.AppendLine("```");
+                    sb.AppendLine(preview);
+                    sb.AppendLine("```");
+                }
+            }
+            catch (Exception ex)
+            {
+                sb.AppendLine($"- `{file}` (unreadable: {ex.Message})");
+            }
+        }
+
+        return sb.ToString().TrimEnd();
+    }
+
+    private static bool LooksLikeTextResource(string path)
+    {
+        var extension = Path.GetExtension(path).ToLowerInvariant();
+        return extension is ".txt" or ".md" or ".markdown" or ".json" or ".yaml" or ".yml" or ".toml" or ".xml" or ".html" or ".css" or ".js" or ".mjs" or ".cjs" or ".ts" or ".tsx" or ".jsx" or ".py" or ".ps1" or ".sh" or ".bat" or ".cmd" or ".csv" or ".ini" or ".sql" or "";
+    }
+
+    private static string EnsureTrailingSeparator(string path)
+    {
+        return path.EndsWith(Path.DirectorySeparatorChar) ? path : path + Path.DirectorySeparatorChar;
     }
 
     private string ExecuteImageGenerationListProfiles()
@@ -1545,15 +1625,40 @@ public partial class ToolExecutor
             OutputPath = OptionalString(args, "output_path")
         };
 
+        return await ExecuteImageOperationAsync("image_generation", request, ct);
+    }
+
+    private async Task<string> ExecuteImageEditAsync(Dictionary<string, JsonElement> args, CancellationToken ct)
+    {
+        var request = new ImageGenerationRequest
+        {
+            Agent = _agentName,
+            ImageProfile = OptionalString(args, "profile"),
+            BatchId = OptionalString(args, "batch_id"),
+            Session = _sessionId,
+            SourceImagePath = RequiredString(args, "source_image_path"),
+            Prompt = RequiredString(args, "prompt"),
+            Size = OptionalString(args, "size"),
+            Quality = OptionalString(args, "quality"),
+            OutputFormat = OptionalString(args, "output_format"),
+            Count = IntArg(args, "count", 1),
+            OutputPath = OptionalString(args, "output_path")
+        };
+
+        return await ExecuteImageOperationAsync("image_edit", request, ct);
+    }
+
+    private async Task<string> ExecuteImageOperationAsync(string operation, ImageGenerationRequest request, CancellationToken ct)
+    {
         if (_synchronousImageGeneration)
         {
-            request.JobId = NewImageGenerationToolId("img");
+            request.JobId = NewImageGenerationToolId(operation == "image_edit" ? "imge" : "img");
             request.BatchId = string.IsNullOrWhiteSpace(request.BatchId) ? NewImageGenerationToolId("batch") : request.BatchId;
             var outcome = await new MultiModalClient(_path).GenerateImageDetailedAsync(_agentName, request, ct);
             var outcomeJson = JsonSerializer.Serialize(outcome, new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true });
             if (!outcome.Success)
             {
-                return $"[image_generation] Synchronous image generation failed. Error category: {outcome.ErrorCategory ?? "unknown"}. No automatic retry was performed; decide the next step from the authoritative tool result.\n{outcomeJson}";
+                return $"[{operation}] Synchronous {OperationLabel(operation)} failed. Error category: {outcome.ErrorCategory ?? "unknown"}. No automatic retry was performed; decide the next step from the authoritative tool result.\n{outcomeJson}";
             }
 
             var previews = string.Join(", ", outcome.Results.Select(result => result.RelativePath));
@@ -1563,13 +1668,17 @@ public partial class ToolExecutor
                 .Distinct(StringComparer.OrdinalIgnoreCase));
             var fallback = outcome.FallbackOccurred ? " Provider fallback occurred." : "";
             var profileNote = string.IsNullOrWhiteSpace(usedProfiles) ? "" : $" using {usedProfiles}";
-            return $"[image_generation] Synchronously generated {outcome.Results.Count} image(s){profileNote}.{fallback} Preview them for the user with {{show_file:{previews}}}.\n{outcomeJson}";
+            var verb = operation == "image_edit" ? "edited" : "generated";
+            return $"[{operation}] Synchronously {verb} {outcome.Results.Count} image(s){profileNote}.{fallback} Preview them for the user with {{show_file:{previews}}}.\n{outcomeJson}";
         }
 
         var job = new ImageGenerationJobService(_path).Start(_agentName, request, _sessionId);
         var json = JsonSerializer.Serialize(job, new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true });
-        return $"[image_generation] Started asynchronous image generation job {job.JobId} in batch {job.BatchId}. Do other work while the host runs it; use image_generation_show_process(job_id='{job.JobId}') for authoritative status, final files, fallback details, and errors. Completion or failure will also be recorded by the host.\n{json}";
+        return $"[{operation}] Started asynchronous {OperationLabel(operation)} job {job.JobId} in batch {job.BatchId}. Do other work while the host runs it; use image_generation_show_process(job_id='{job.JobId}') for authoritative status, final files, fallback details, and errors. Completion or failure will also be recorded by the host.\n{json}";
     }
+
+    private static string OperationLabel(string operation)
+        => operation == "image_edit" ? "image edit" : "image generation";
 
     private static string NewImageGenerationToolId(string prefix)
         => prefix + "_" + DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + "_" + Guid.NewGuid().ToString("N")[..8];
@@ -1631,6 +1740,7 @@ public partial class ToolExecutor
             OutputFormat = OptionalString(args, "output_format") ?? oldJob.OutputFormat,
             Count = IntArg(args, "count", oldJob.Count),
             OutputPath = OptionalString(args, "output_path") ?? oldJob.OutputPath,
+            SourceImagePath = oldJob.SourceImagePath,
             UseBrowserTemp = oldJob.UseBrowserTemp,
             AllowProfileFallback = oldJob.AllowProfileFallback
         };

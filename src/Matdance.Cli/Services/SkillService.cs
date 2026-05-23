@@ -9,8 +9,19 @@ public class SkillService
 {
     public const int MaxSkillContentChars = 40000;
     public const int MaxSkillDescriptionChars = 2000;
+    public const int MaxSkillResourceFileChars = 200000;
     private readonly PathService _path;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
+    private static readonly HashSet<string> AllowedSkillResourceRoots = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "scripts",
+        "templates",
+        "resources",
+        "assets",
+        "examples",
+        "config",
+        "configs"
+    };
 
     public SkillService(PathService path)
     {
@@ -27,6 +38,7 @@ public class SkillService
 
         var id = GenerateSkillId(request.Name);
         var skillDir = _path.GetSkillPath(agentName, id);
+        ValidateResourceFiles(skillDir, request.ResourceFiles);
         Directory.CreateDirectory(skillDir);
 
         var skill = new SkillItem
@@ -41,6 +53,7 @@ public class SkillService
         };
 
         SaveSkill(skillDir, skill);
+        WriteResourceFiles(skillDir, request.ResourceFiles);
         return skill;
     }
 
@@ -72,11 +85,57 @@ public class SkillService
             skill.Content = request.Content;
 
         ValidateSkillPayload(skill.Name, skill.Description, skill.Content);
+        ValidateResourceFiles(skillDir, request.ResourceFiles);
 
         skill.UpdatedAt = UserTimeZoneService.Now();
         SaveSkill(skillDir, skill);
+        WriteResourceFiles(skillDir, request.ResourceFiles);
         SkillValidationState.DeleteReport(skillDir);
         return skill;
+    }
+
+    public List<string> WriteResourceFiles(string skillDir, List<SkillResourceFile>? resources)
+    {
+        var notes = new List<string>();
+        if (resources == null || resources.Count == 0)
+            return notes;
+        if (!Directory.Exists(skillDir))
+            return notes;
+
+        var normalizedSkillDir = EnsureTrailingSeparator(Path.GetFullPath(skillDir));
+        foreach (var resource in resources)
+        {
+            if (resource == null || string.IsNullOrWhiteSpace(resource.Path) || resource.Content == null)
+                continue;
+
+            if (!TryResolveResourcePath(resource.Path, skillDir, normalizedSkillDir, out var resolvedPath, out var reason))
+                throw new ArgumentException($"Skill resource `{resource.Path}` is invalid: {reason}");
+
+            ValidateResourceContent(resource.Path, resource.Content);
+            Directory.CreateDirectory(Path.GetDirectoryName(resolvedPath)!);
+            AtomicFile.WriteAllText(resolvedPath, resource.Content);
+            notes.Add($"Wrote resource `{ToSkillRelativePath(resolvedPath, normalizedSkillDir)}`.");
+        }
+
+        return notes;
+    }
+
+    private static void ValidateResourceFiles(string skillDir, List<SkillResourceFile>? resources)
+    {
+        if (resources == null || resources.Count == 0)
+            return;
+
+        var normalizedSkillDir = EnsureTrailingSeparator(Path.GetFullPath(skillDir));
+        foreach (var resource in resources)
+        {
+            if (resource == null || string.IsNullOrWhiteSpace(resource.Path) || resource.Content == null)
+                continue;
+
+            if (!TryResolveResourcePath(resource.Path, skillDir, normalizedSkillDir, out _, out var reason))
+                throw new ArgumentException($"Skill resource `{resource.Path}` is invalid: {reason}");
+
+            ValidateResourceContent(resource.Path, resource.Content);
+        }
     }
 
     public void Delete(string agentName, string skillId)
@@ -155,6 +214,100 @@ public class SkillService
 
         if ((content ?? string.Empty).Length > MaxSkillContentChars)
             throw new ArgumentException($"Skill content is over limit: {(content ?? string.Empty).Length} chars > {MaxSkillContentChars}. Split the skill by scope or move long reusable material into skill-local resource files.");
+    }
+
+    private static void ValidateResourceContent(string path, string content)
+    {
+        if (content.Length > MaxSkillResourceFileChars)
+            throw new ArgumentException($"Skill resource `{path}` is over limit: {content.Length} chars > {MaxSkillResourceFileChars}. Split the resource or summarize large evidence instead of storing it whole.");
+    }
+
+    public static bool TryResolveResourcePath(string resourcePath, string skillDir, out string resolvedPath, out string reason)
+    {
+        return TryResolveResourcePath(resourcePath, skillDir, EnsureTrailingSeparator(Path.GetFullPath(skillDir)), out resolvedPath, out reason);
+    }
+
+    private static bool TryResolveResourcePath(string resourcePath, string skillDir, string normalizedSkillDir, out string resolvedPath, out string reason)
+    {
+        resolvedPath = string.Empty;
+        reason = string.Empty;
+        var cleaned = CleanResourceCandidate(resourcePath);
+        if (string.IsNullOrWhiteSpace(cleaned))
+        {
+            reason = "empty path";
+            return false;
+        }
+
+        if (Path.IsPathRooted(cleaned))
+        {
+            reason = "absolute paths are not allowed";
+            return false;
+        }
+
+        var normalized = NormalizeResourcePath(cleaned);
+        if (PathSafety.ContainsParentTraversal(normalized))
+        {
+            reason = "parent-directory traversal is not allowed";
+            return false;
+        }
+
+        if (PathSafety.StartsWithSegment(normalized, "workspace"))
+        {
+            reason = "workspace resources are not allowed";
+            return false;
+        }
+
+        if (!IsAllowedResourcePath(normalized))
+        {
+            reason = "resource files must be under ./scripts/, ./templates/, ./resources/, ./assets/, ./examples/, ./config/, or ./configs/";
+            return false;
+        }
+
+        resolvedPath = Path.GetFullPath(Path.Combine(skillDir, normalized));
+        if (!PathSafety.IsUnderRoot(resolvedPath, normalizedSkillDir))
+        {
+            reason = "resolved path is outside the skill directory";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static string NormalizeResourcePath(string path)
+    {
+        var normalized = PathSafety.NormalizeSeparators(path);
+        var parts = normalized.Split(
+                new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
+                StringSplitOptions.RemoveEmptyEntries)
+            .Where(part => part != ".")
+            .ToArray();
+        return string.Join(Path.DirectorySeparatorChar, parts);
+    }
+
+    private static bool IsAllowedResourcePath(string normalizedPath)
+    {
+        var firstSegment = normalizedPath.Split(
+                new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
+                StringSplitOptions.RemoveEmptyEntries)
+            .FirstOrDefault();
+        return firstSegment != null && AllowedSkillResourceRoots.Contains(firstSegment);
+    }
+
+    private static string CleanResourceCandidate(string value)
+    {
+        return value.Trim()
+            .Trim('"', '\'', '‘', '’', '“', '”', '<', '>', '(', ')', '[', ']', '{', '}', ',', ';', '，', '。', '；', '：', ':');
+    }
+
+    private static string ToSkillRelativePath(string fullPath, string normalizedSkillDir)
+    {
+        var relative = Path.GetRelativePath(normalizedSkillDir, fullPath);
+        return "./" + relative.Replace(Path.DirectorySeparatorChar, '/');
+    }
+
+    private static string EnsureTrailingSeparator(string path)
+    {
+        return path.EndsWith(Path.DirectorySeparatorChar) ? path : path + Path.DirectorySeparatorChar;
     }
 
     private static void SaveSkill(string skillDir, SkillItem skill)

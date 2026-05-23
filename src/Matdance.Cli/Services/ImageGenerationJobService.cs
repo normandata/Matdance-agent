@@ -43,11 +43,13 @@ public sealed class ImageGenerationJobService
             OutputPath = request.OutputPath,
             UseBrowserTemp = request.UseBrowserTemp,
             AllowProfileFallback = request.AllowProfileFallback,
+            Operation = string.IsNullOrWhiteSpace(request.SourceImagePath) ? "generation" : "edit",
+            SourceImagePath = request.SourceImagePath,
             CreatedAt = UserTimeZoneService.Now()
         };
 
         Save(agent, job);
-        _events.Record(agent, "image_generation", job.JobId, "image_generation", "queued", $"Queued image generation job {job.JobId} in batch {job.BatchId}.", "wait_for_completion");
+        _events.Record(agent, "image_generation", job.JobId, "image_generation", "queued", $"Queued {OperationLabel(job)} job {job.JobId} in batch {job.BatchId}.", "wait_for_completion");
 
         var cts = new CancellationTokenSource(TimeSpan.FromMinutes(25));
         CancellationTokens[job.JobId] = cts;
@@ -127,7 +129,7 @@ public sealed class ImageGenerationJobService
             job.Status = "running";
             job.StartedAt = UserTimeZoneService.Now();
             Save(job.Agent, job);
-            _events.Record(job.Agent, "image_generation", job.JobId, "image_generation", "running", $"Running image generation job {job.JobId}.", "wait_for_completion");
+            _events.Record(job.Agent, "image_generation", job.JobId, "image_generation", "running", $"Running {OperationLabel(job)} job {job.JobId}.", "wait_for_completion");
 
             var request = new ImageGenerationRequest
             {
@@ -143,7 +145,8 @@ public sealed class ImageGenerationJobService
                 OutputFormat = job.OutputFormat,
                 Count = job.Count,
                 OutputPath = job.OutputPath,
-                UseBrowserTemp = job.UseBrowserTemp
+                UseBrowserTemp = job.UseBrowserTemp,
+                SourceImagePath = job.SourceImagePath
             };
 
             var outcome = await new MultiModalClient(_path).GenerateImageDetailedAsync(job.Agent, request, ct);
@@ -260,17 +263,18 @@ public sealed class ImageGenerationJobService
         var count = job.Results.Count;
         var fallback = job.FallbackOccurred ? " Fallback occurred." : string.Empty;
         return job.Status == "succeeded"
-            ? $"Image generation job {job.JobId} succeeded with {count} file(s).{fallback}"
-            : $"Image generation job {job.JobId} ended as {job.Status}: {job.Error ?? job.ErrorCategory ?? "unknown"}.";
+            ? $"{Capitalize(OperationLabel(job))} job {job.JobId} succeeded with {count} file(s).{fallback}"
+            : $"{Capitalize(OperationLabel(job))} job {job.JobId} ended as {job.Status}: {job.Error ?? job.ErrorCategory ?? "unknown"}.";
     }
 
     private static string BuildSessionNotice(ImageGenerationJob job, IReadOnlyList<ImageGenerationJob> batchJobs)
     {
         var sb = new System.Text.StringBuilder();
-        sb.AppendLine("## Image Generation Host Notice");
+        sb.AppendLine(job.Operation == "edit" ? "## Image Edit Host Notice" : "## Image Generation Host Notice");
         sb.AppendLine();
         sb.AppendLine($"Job ID: {job.JobId}");
         sb.AppendLine($"Batch ID: {job.BatchId}");
+        sb.AppendLine($"Operation: {OperationLabel(job)}");
         sb.AppendLine($"Status: {job.Status}");
         if (batchJobs.Count > 0)
         {
@@ -283,6 +287,7 @@ public sealed class ImageGenerationJobService
                 : $"Batch status: active ({active} queued/running, {succeeded} succeeded, {failed} failed, {canceled} canceled)");
         }
         sb.AppendLine($"Prompt: {job.Prompt}");
+        if (!string.IsNullOrWhiteSpace(job.SourceImagePath)) sb.AppendLine($"Source image: {job.SourceImagePath}");
         if (!string.IsNullOrWhiteSpace(job.RequestedProfile)) sb.AppendLine($"Requested profile: {job.RequestedProfile}");
         if (job.FallbackOccurred) sb.AppendLine("Provider fallback: yes");
         var finalProfiles = job.Results
@@ -296,7 +301,7 @@ public sealed class ImageGenerationJobService
         if (job.Results.Count > 0)
         {
             sb.AppendLine();
-            sb.AppendLine("Generated files:");
+            sb.AppendLine(job.Operation == "edit" ? "Edited files:" : "Generated files:");
             foreach (var result in job.Results)
                 sb.AppendLine($"- {result.RelativePath} (prompt: {result.Prompt ?? job.Prompt})");
             sb.AppendLine();
@@ -310,7 +315,7 @@ public sealed class ImageGenerationJobService
         if (activeBatchJobs == 0 && batchResults.Count > job.Results.Count)
         {
             sb.AppendLine();
-            sb.AppendLine("Batch generated files:");
+            sb.AppendLine(job.Operation == "edit" ? "Batch edited files:" : "Batch generated files:");
             foreach (var item in batchResults)
                 sb.AppendLine($"- {item.Result.RelativePath} (job: {item.Job.JobId}, prompt: {item.Result.Prompt ?? item.Job.Prompt})");
             sb.AppendLine();
@@ -320,6 +325,12 @@ public sealed class ImageGenerationJobService
         sb.AppendLine("This notice is authoritative host state for this image job.");
         return sb.ToString();
     }
+
+    private static string OperationLabel(ImageGenerationJob job)
+        => string.Equals(job.Operation, "edit", StringComparison.OrdinalIgnoreCase) ? "image edit" : "image generation";
+
+    private static string Capitalize(string value)
+        => string.IsNullOrWhiteSpace(value) ? value : char.ToUpperInvariant(value[0]) + value[1..];
 
     private void Save(string agent, ImageGenerationJob job)
     {

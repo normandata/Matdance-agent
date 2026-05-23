@@ -21,7 +21,7 @@ public class LlmClient
     private const int ImagePayloadRetryCutoffAttempt = 3;
     private static readonly TimeSpan StreamTransportIdleTimeout = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan StreamUsefulOutputTimeout = TimeSpan.FromSeconds(90);
-    private static readonly TimeSpan StreamResponseTimeout = TimeSpan.FromMinutes(3);
+    private static readonly TimeSpan StreamResponseTimeout = TimeSpan.FromMinutes(30);
 
     public LlmClient(AgentConfig config)
     {

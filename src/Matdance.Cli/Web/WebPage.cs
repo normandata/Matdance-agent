@@ -1735,8 +1735,14 @@ public static class WebPage
     .lab-card-head{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:30px;}
     .lab-card-head strong{min-width:0;color:var(--ink);font-size:15px;line-height:1.25;overflow-wrap:anywhere;}
     .lab-card-head span{max-width:54%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:5px 8px;border:1px solid rgba(103,247,177,.20);border-radius:999px;color:var(--green);background:rgba(103,247,177,.065);font-size:10px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;}
+    .lab-mode-tabs{display:flex;gap:8px;flex-wrap:wrap;}
+    .lab-mode-tab{width:auto;min-width:94px;min-height:32px;border-radius:12px;border:1px solid rgba(255,255,255,.10);background:rgba(255,255,255,.035);color:var(--soft);font-size:12px;font-weight:760;}
+    .lab-mode-tab.active{border-color:rgba(103,247,177,.35);background:rgba(103,247,177,.12);color:var(--green);}
     .lab-card textarea{min-height:108px;resize:vertical;border:1px solid rgba(255,255,255,.10);border-radius:14px;background:rgba(3,7,16,.35);padding:10px 11px;}
     .lab-image-card textarea{min-height:172px;}
+    .lab-image-edit-source{display:none;gap:8px;align-items:center;padding:10px 11px;border:1px dashed rgba(255,255,255,.14);border-radius:14px;background:rgba(0,0,0,.14);}
+    .lab-image-edit-source.active{display:flex;}
+    .lab-image-edit-source input{min-width:0;flex:1;}
     .lab-row{display:flex;align-items:center;gap:9px;flex-wrap:wrap;}
     .lab-row > input,.lab-row > select{flex:1 1 150px;min-width:0;min-height:38px;border-radius:12px;}
     .lab-row > button{width:auto;min-width:108px;min-height:38px;border-radius:12px;white-space:normal;}
@@ -2310,6 +2316,13 @@ public static class WebPage
           <section class="agent-main-body lab-body">
             <section class="control-card lab-card lab-image-card">
               <div class="lab-card-head"><strong id="labImageTitle">Image Generation</strong><span id="labImageStatus">image_generation</span></div>
+              <div class="lab-mode-tabs" role="tablist" aria-label="Image mode">
+                <button id="labImageModeGenerate" class="lab-mode-tab active" type="button" data-lab-image-mode="generation">Generate</button>
+                <button id="labImageModeEdit" class="lab-mode-tab" type="button" data-lab-image-mode="edit">Edit</button>
+              </div>
+              <div id="labImageEditSource" class="lab-image-edit-source">
+                <input id="labImageEditFile" type="file" accept="image/png,image/jpeg,image/webp" />
+              </div>
               <textarea id="labImagePrompt" placeholder="Describe the image to generate..."></textarea>
               <div class="lab-row">
                 <select id="labImageProfile"><option value="">auto profile</option></select>
@@ -2435,7 +2448,7 @@ public static class WebPage
       const languages = Array.isArray(navigator.languages) && navigator.languages.length ? navigator.languages : [navigator.language || navigator.userLanguage || ''];
       return languages.some(lang => String(lang || '').toLowerCase().startsWith('zh')) ? 'zh' : 'en';
     }
-    const state = { agents: [], sessions: [], agent: null, session: null, sessionReadOnly: false, busy: false, abortController: null, matrixTimer: null, commandIndex: 0, activeTab: 'home', settingsSection: 'general', runtimeEventsTimer: null, runtimeEventsAgent: null, schedulePage: 1, schedulePageSize: 8, scheduledTasks: null, scheduledSelected: null, lang: preferredLanguage(), memoryTab: 'core', memoryPage: 1, memoryPageSize: 10, memoryItems: null, memorySelectedItem: null, memorySnapshots: [], memoryVectorAtlas: null, memoryVectorResults: null, memoryVectorHover: null, memoryVectorPinned: null, memoryOrganizing: false, skillsWorking: false, skillsLearnFiles: [], selectedSkillValidationReport: null, selectedSkillImportReport: null, browserOpen: false, browserWs: null, browserMaximized: false, chatNearBottom: true, chatFollowStream: true, chatUserScrollIntentAt: 0, chatProgrammaticScrollUntil: 0, suppressChatAutoScroll: false, chatAttachments: [], multimodal: null, securitySettings: null, skillValidationSettings: null, modelProviders: [], audioPlayer: null, audioUrl: null, audioButton: null, ttsErrorTimer: null, soundCues: null, soundCueGroup: 'flow', soundCuePlayer: null, soundCueQueue: [], soundCuePlaying: false, soundCuePrimed: false, soundCueBlocked: false, soundCueUploadType: null, soundCueSaveTimer: null, soundCueLastPlayedAt: {}, soundCueIdleResolvers: [], scheduledNoticeKeys: new Set(), imageNoticeKeys: new Set(), hostNoticeContinuationRunning: false, recorder: null, recordChunks: [], voiceMode: false, voiceRecording: false, voiceCanceled: false, voiceStartY: 0, voiceStartAt: 0, voiceTimer: null, voiceSession: null, voicePointerId: null, labRecorder: null, labRecordChunks: [] };
+    const state = { agents: [], sessions: [], agent: null, session: null, sessionReadOnly: false, busy: false, abortController: null, matrixTimer: null, commandIndex: 0, activeTab: 'home', settingsSection: 'general', runtimeEventsTimer: null, runtimeEventsAgent: null, schedulePage: 1, schedulePageSize: 8, scheduledTasks: null, scheduledSelected: null, lang: preferredLanguage(), memoryTab: 'core', memoryPage: 1, memoryPageSize: 10, memoryItems: null, memorySelectedItem: null, memorySnapshots: [], memoryVectorAtlas: null, memoryVectorResults: null, memoryVectorHover: null, memoryVectorPinned: null, memoryOrganizing: false, skillsWorking: false, skillsLearnFiles: [], selectedSkillValidationReport: null, selectedSkillImportReport: null, browserOpen: false, browserWs: null, browserMaximized: false, chatNearBottom: true, chatFollowStream: true, chatUserScrollIntentAt: 0, chatProgrammaticScrollUntil: 0, suppressChatAutoScroll: false, chatAttachments: [], multimodal: null, securitySettings: null, skillValidationSettings: null, modelProviders: [], audioPlayer: null, audioUrl: null, audioButton: null, ttsErrorTimer: null, soundCues: null, soundCueGroup: 'flow', soundCuePlayer: null, soundCueQueue: [], soundCuePlaying: false, soundCuePrimed: false, soundCueBlocked: false, soundCueUploadType: null, soundCueSaveTimer: null, soundCueLastPlayedAt: {}, soundCueIdleResolvers: [], scheduledNoticeKeys: new Set(), imageNoticeKeys: new Set(), hostNoticeContinuationRunning: false, recorder: null, recordChunks: [], voiceMode: false, voiceRecording: false, voiceCanceled: false, voiceStartY: 0, voiceStartAt: 0, voiceTimer: null, voiceSession: null, voicePointerId: null, labRecorder: null, labRecordChunks: [], labImageMode: 'generation' };
     const APP_DESIGN_WIDTH = 1360;
     const APP_DESIGN_HEIGHT = 995;
     function updateAppScale() {
@@ -2709,10 +2722,10 @@ public static class WebPage
       labHeroTitle:'调试星球',labHeroText:'直接测试真实工具和内置组件，用运行结果确认配置是否可用。',
       labAgentLabel:'测试目标',labNoteTitle:'运行时状态',labNoteText:'这里调用的是 agent 和聊天页同一套端点。Lab 里的结果可以直接反映当前配置是否可用。',
       labMainTitle:'Lab',labPhaseLabel:'debug',labState:'选择 agent 后测试已配置的多模态端点。',
-      labImageTitle:'图像生成',labTtsTitle:'语音合成',labSttTitle:'语音转文字',
-      labImageRun:'生成',labTtsRun:'合成',labSttRun:'转写文件',labSttRecord:'录音',
-      labImagePlaceholder:'描述要生成的图像...',labTtsPlaceholder:'输入要朗读的文本...',labTtsVoicePlaceholder:'voice 覆盖，可留空',
-      labNoImageReturned:'没有返回图像。',
+      labImageTitle:'图像生成 / 图片编辑',labTtsTitle:'语音合成',labSttTitle:'语音转文字',
+      labImageRun:'生成',labImageEditRun:'编辑',labImageModeGenerate:'图片生成',labImageModeEdit:'图片编辑',labTtsRun:'合成',labSttRun:'转写文件',labSttRecord:'录音',
+      labImagePlaceholder:'描述要生成的图像...',labImageEditPlaceholder:'描述要施加到上传图片的编辑...',labTtsPlaceholder:'输入要朗读的文本...',labTtsVoicePlaceholder:'voice 覆盖，可留空',
+      labNoImageReturned:'没有返回图像。',labImageEditNeedsFile:'请先上传一张要编辑的图片。',
       labGeneratingSpeech:'正在生成语音...',
       labPlayAudio:'播放',
       labFileSttUnavailable:'文件转写当前不可用；请使用录音识别。',
@@ -2748,10 +2761,10 @@ public static class WebPage
       labHeroTitle:'Debug Lab',labHeroText:'Test real tools and built-in components, then judge the configuration from runtime results.',
       labAgentLabel:'test target',labNoteTitle:'Runtime state',labNoteText:'These buttons call the same endpoints the agent and chat UI use. Lab results directly reflect whether the current configuration works.',
       labMainTitle:'Lab',labPhaseLabel:'debug',labState:'Select an agent and test configured multimodal endpoints.',
-      labImageTitle:'Image Generation',labTtsTitle:'Text To Speech',labSttTitle:'Speech To Text',
-      labImageRun:'Generate',labTtsRun:'Speak',labSttRun:'Transcribe File',labSttRecord:'Record',
-      labImagePlaceholder:'Describe the image to generate...',labTtsPlaceholder:'Text to speak...',labTtsVoicePlaceholder:'voice override, optional',
-      labNoImageReturned:'No image returned.',
+      labImageTitle:'Image Generation / Edit',labTtsTitle:'Text To Speech',labSttTitle:'Speech To Text',
+      labImageRun:'Generate',labImageEditRun:'Edit',labImageModeGenerate:'Generate',labImageModeEdit:'Edit',labTtsRun:'Speak',labSttRun:'Transcribe File',labSttRecord:'Record',
+      labImagePlaceholder:'Describe the image to generate...',labImageEditPlaceholder:'Describe the edit to apply to the uploaded image...',labTtsPlaceholder:'Text to speak...',labTtsVoicePlaceholder:'voice override, optional',
+      labNoImageReturned:'No image returned.',labImageEditNeedsFile:'Upload one image to edit first.',
       labGeneratingSpeech:'Generating speech...',
       labPlayAudio:'Play',
       labFileSttUnavailable:'File transcription is not available here; use recording instead.',
@@ -4692,13 +4705,15 @@ public static class WebPage
       setNodeText('#labMainTitle', t('labMainTitle'));
       setNodeText('#labPhaseLabel', t('labPhaseLabel'));
       setNodeText('#labImageTitle', t('labImageTitle'));
+      setText('labImageModeGenerate', 'labImageModeGenerate');
+      setText('labImageModeEdit', 'labImageModeEdit');
       setNodeText('#labTtsTitle', t('labTtsTitle'));
       setNodeText('#labSttTitle', t('labSttTitle'));
-      setText('labImageRun', 'labImageRun');
+      setText('labImageRun', state.labImageMode === 'edit' ? 'labImageEditRun' : 'labImageRun');
       setText('labTtsRun', 'labTtsRun');
       setText('labSttRun', 'labSttRun');
       setText('labSttRecord', state.labRecorder ? 'stopResponse' : 'labSttRecord');
-      setPlaceholder('labImagePrompt', 'labImagePlaceholder');
+      setPlaceholder('labImagePrompt', state.labImageMode === 'edit' ? 'labImageEditPlaceholder' : 'labImagePlaceholder');
       setPlaceholder('labTtsText', 'labTtsPlaceholder');
       setPlaceholder('labTtsVoice', 'labTtsVoicePlaceholder');
       const stateNode = $('labState');
@@ -7356,8 +7371,22 @@ public static class WebPage
 
     async function api(url, options) {
       const res = await fetch(url, options);
-      if (!res.ok) throw new Error(await res.text());
+      if (!res.ok) throw new Error(await readApiError(res));
       return await res.json();
+    }
+    async function readApiError(res) {
+      const text = await res.text();
+      if (!text) return 'HTTP ' + res.status;
+      try {
+        const json = JSON.parse(text);
+        return json.message || json.error || text;
+      } catch {
+        return text;
+      }
+    }
+
+    function waitForNextFrame() {
+      return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     }
 
     function showEasterEgg() {
@@ -8263,30 +8292,68 @@ public static class WebPage
         }
         if (current && Array.from(ttsProfile.options).some(option => option.value === current)) ttsProfile.value = current;
       }
-      if ($('labImageStatus')) $('labImageStatus').textContent = image.enabled && hasEffectiveKey(image) ? 'ready' : 'disabled/missing key';
+      if ($('labImageStatus')) $('labImageStatus').dataset.configStatus = image.enabled && hasEffectiveKey(image) ? 'ready' : 'disabled/missing key';
       if ($('labTtsStatus')) $('labTtsStatus').textContent = tts.mode && tts.mode !== 'off' && hasEffectiveKey(tts) ? tts.mode : 'disabled/missing key';
       if ($('labSttStatus')) $('labSttStatus').textContent = canUseStt() ? t('labBrowserSpeechReady') : t('labBrowserSpeechUnavailable');
+      syncLabImageMode();
+    }
+
+    function setLabImageMode(mode) {
+      state.labImageMode = mode === 'edit' ? 'edit' : 'generation';
+      syncLabImageMode();
+      updateLabLang();
+    }
+
+    function syncLabImageMode() {
+      const edit = state.labImageMode === 'edit';
+      $('labImageModeGenerate')?.classList.toggle('active', !edit);
+      $('labImageModeEdit')?.classList.toggle('active', edit);
+      $('labImageEditSource')?.classList.toggle('active', edit);
+      if ($('labImageStatus')) {
+        const config = $('labImageStatus').dataset.configStatus || 'unknown';
+        $('labImageStatus').textContent = (edit ? 'image_edit' : 'image_generation') + ' / ' + config;
+      }
     }
 
     async function runLabImage() {
       const prompt = $('labImagePrompt')?.value.trim();
       if (!prompt) return;
       const result = $('labImageResult');
-      result.textContent = 'Generating...';
+      const isEdit = state.labImageMode === 'edit';
+      const sourceFile = $('labImageEditFile')?.files?.[0] || null;
+      if (isEdit && !sourceFile) {
+        result.textContent = t('labImageEditNeedsFile');
+        return;
+      }
+      result.textContent = isEdit ? 'Editing...' : 'Generating...';
       try {
         const selectedProfile = $('labImageProfile')?.value || null;
-        const data = await api('/api/image-generation', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            agent: state.agent,
-            imageProfile: selectedProfile,
-            allowProfileFallback: !selectedProfile,
-            prompt,
-            size: $('labImageSize')?.value || null,
-            count: 1
-          })
-        });
+        let data;
+        if (isEdit) {
+          const form = new FormData();
+          form.append('agent', state.agent);
+          if (selectedProfile) form.append('imageProfile', selectedProfile);
+          form.append('allowProfileFallback', selectedProfile ? 'false' : 'true');
+          form.append('prompt', prompt);
+          const size = $('labImageSize')?.value || '';
+          if (size) form.append('size', size);
+          form.append('count', '1');
+          form.append('image', sourceFile);
+          data = await api('/api/image-edit', { method: 'POST', body: form });
+        } else {
+          data = await api('/api/image-generation', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              agent: state.agent,
+              imageProfile: selectedProfile,
+              allowProfileFallback: !selectedProfile,
+              prompt,
+              size: $('labImageSize')?.value || null,
+              count: 1
+            })
+          });
+        }
         result.innerHTML = '';
         const generated = data.results || [];
         const first = generated[0] || {};
@@ -9936,6 +10003,19 @@ public static class WebPage
       return file?.webkitRelativePath || file?.name || 'source';
     }
 
+    function shouldSkipSkillsLearnFile(file) {
+      const name = skillsLearnFileName(file).replace(/\\/g, '/');
+      const parts = name.split('/').filter(Boolean);
+      if (parts.some(part => {
+        const lower = part.toLowerCase();
+        return lower === '.git' || lower === '.svn' || lower === '.hg' ||
+          lower === 'node_modules' || lower === 'bin' || lower === 'obj' ||
+          lower === '.build-check';
+      })) return true;
+      const base = (parts[parts.length - 1] || '').toLowerCase();
+      return base === 'agent_config.json' || base === 'multimodal_config.json';
+    }
+
     function updateSkillsLearnFileSummary() {
       const summary = $('skillsLearnSelected');
       if (!summary) return;
@@ -9956,7 +10036,7 @@ public static class WebPage
     }
 
     function addSkillsLearnFiles(fileList) {
-      const files = Array.from(fileList || []);
+      const files = Array.from(fileList || []).filter(file => !shouldSkipSkillsLearnFile(file));
       if (!files.length) return;
       const seen = new Set((state.skillsLearnFiles || []).map(function(file) {
         return skillsLearnFileName(file) + '|' + file.size + '|' + file.lastModified;
@@ -10045,6 +10125,7 @@ public static class WebPage
         hideSkillsLearnDialog();
         setSkillsState(t('skillsLearnStarted'));
         showOrganizeProgress(0, t('skillsJobPrepare'), t('skillsLearnTitleProgress'), t('skillsLearnDescProgress'));
+        await waitForNextFrame();
         let requestOptions;
         if (sourceFiles.length > 0) {
           const form = new FormData();
@@ -10063,7 +10144,8 @@ public static class WebPage
             body: JSON.stringify({ agent: state.agent, sourcePath, sourceText, nameHint })
           };
         }
-        const res = await api('/api/skills/learn-validate', requestOptions);
+        const learnUrl = '/api/skills/learn-validate?agent=' + encodeURIComponent(state.agent || '');
+        const res = await api(learnUrl, requestOptions);
         if (res.status === 'busy') {
           setSkillsState(t('skillsOrganizeBusy'));
           hideOrganizeProgress();
@@ -10074,8 +10156,10 @@ public static class WebPage
           pollSkillsJobStatus(res.jobId, 'learn_validate');
         }
       } catch (err) {
-        setSkillsState(t('skillsJobStartFailedPrefix') + ': ' + err.message);
-        hideOrganizeProgress();
+        const message = t('skillsJobStartFailedPrefix') + ': ' + err.message;
+        setSkillsState(message);
+        updateOrganizeProgress(100, message, err.message);
+        setTimeout(hideOrganizeProgress, 6000);
         state.skillsWorking = false;
       }
     }
@@ -10137,8 +10221,17 @@ public static class WebPage
           } else if (data.status === 'failed') {
             clearInterval(pollInterval);
             state.skillsWorking = false;
-            setSkillsState(t('skillsJobFailedPrefix') + ': ' + (data.error || t('unknownError')));
+            const message = data.error || data.stage || t('unknownError');
+            setSkillsState(t('skillsJobFailedPrefix') + ': ' + message);
             hideOrganizeProgress();
+            renderSkillJobFailureReport(data, message);
+          } else if (data.status === 'canceled' || data.status === 'rejected') {
+            clearInterval(pollInterval);
+            state.skillsWorking = false;
+            const message = data.error || data.stage || data.resultSummary || t('unknownError');
+            setSkillsState(t('skillsJobFailedPrefix') + ': ' + message);
+            hideOrganizeProgress();
+            renderSkillJobFailureReport(data, message);
           }
         } catch (err) {
           clearInterval(pollInterval);
@@ -10147,6 +10240,22 @@ public static class WebPage
           hideOrganizeProgress();
         }
       }, 2000);
+    }
+
+    function renderSkillJobFailureReport(data, message) {
+      const lines = [];
+      lines.push('Skill job failed');
+      if (data?.jobId) lines.push('Job ID: ' + data.jobId);
+      if (data?.kind) lines.push('Kind: ' + data.kind);
+      if (data?.status) lines.push('Status: ' + data.status);
+      if (data?.stage) lines.push('Stage: ' + data.stage);
+      if (message) lines.push('Error: ' + message);
+      if (data?.report) {
+        lines.push('');
+        lines.push('--- Report ---');
+        lines.push(data.report);
+      }
+      renderSkillValidationReport(lines.join('\n'));
     }
 
     function renderSkillValidationReport(report) {
@@ -11316,6 +11425,8 @@ public static class WebPage
     $('voiceHold')?.addEventListener('pointercancel', function(event) { finishVoiceHold(event, true).catch(function(err) { $('hint').textContent = t('sttFailedPrefix') + ': ' + (err.message || String(err)); }); });
     $('voiceHold')?.addEventListener('contextmenu', function(event) { event.preventDefault(); });
     $('labReload')?.addEventListener('click', function() { loadLab().catch(function(err) { $('labState').textContent = err.message; }); });
+    $('labImageModeGenerate')?.addEventListener('click', function() { setLabImageMode('generation'); });
+    $('labImageModeEdit')?.addEventListener('click', function() { setLabImageMode('edit'); });
     $('labImageRun')?.addEventListener('click', function() { runLabImage(); });
     $('labTtsRun')?.addEventListener('click', function() { runLabTts(); });
     $('labSttRun')?.addEventListener('click', function() { runLabSttFile(); });

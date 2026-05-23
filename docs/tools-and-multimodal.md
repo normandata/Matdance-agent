@@ -94,6 +94,14 @@ Ordinary scheduled-task subagents are the exception: they run image generation s
 
 Image prompts should normally be 1-30 characters. Use 31-50 characters only when the user explicitly needs a complex scene or the prompt cannot be shortened without losing the requested content.
 
+## Image Editing
+
+`image_edit` uses the same image profile system as `image_generation`, but sends one existing local image plus an edit prompt to an OpenAI-compatible `/images/edits` endpoint. The source image must resolve inside the agent workspace or `browser_temp`, use `png`, `jpg`, `jpeg`, or `webp`, and stay under the host size limit.
+
+Main-agent calls are host-managed asynchronous jobs and are tracked through the same `image_generation_show_process`, cancel, retry, and completion notice flow. Scheduled-task subagents may run image editing synchronously by host policy so the task receives final files or failure details in the same run.
+
+Debug Lab exposes the same path with a Generate/Edit switch: Edit mode accepts one uploaded source image and an edit prompt, then stores generated outputs under the normal generated image workspace.
+
 ## Text To Speech
 
 `text_to_speech` can create spoken assets and stores outputs under:

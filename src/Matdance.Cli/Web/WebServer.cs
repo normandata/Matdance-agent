@@ -30,6 +30,7 @@ public sealed class WebServer
     private const long MaxSoundCueUploadBytes = 8L * 1024 * 1024;
     private const long MaxSkillImportUploadBytes = 64L * 1024 * 1024;
     private const long MaxSkillImportExtractBytes = 64L * 1024 * 1024;
+    private const long MaxSkillImportRequestBytes = MaxSkillImportUploadBytes + 8L * 1024 * 1024;
     private const int MaxSkillImportExtractFiles = 250;
     private const int MaxChatAttachments = 10;
     private const long MaxChatAttachmentBytes = 128L * 1024 * 1024;
@@ -63,13 +64,13 @@ public sealed class WebServer
 
         builder.Services.Configure<FormOptions>(options =>
         {
-            options.MultipartBodyLengthLimit = MaxChatAttachmentTotalBytes + 1024L * 1024;
+            options.MultipartBodyLengthLimit = Math.Max(MaxChatAttachmentTotalBytes + 1024L * 1024, MaxSkillImportRequestBytes);
             options.ValueLengthLimit = 4 * 1024 * 1024;
             options.MultipartHeadersLengthLimit = 64 * 1024;
         });
         builder.WebHost.ConfigureKestrel(options =>
         {
-            options.Limits.MaxRequestBodySize = MaxChatAttachmentTotalBytes + 1024L * 1024;
+            options.Limits.MaxRequestBodySize = Math.Max(MaxChatAttachmentTotalBytes + 1024L * 1024, MaxSkillImportRequestBytes);
         });
         builder.WebHost.UseUrls($"http://{_host}:{_port}");
         var app = builder.Build();
@@ -141,6 +142,7 @@ public sealed class WebServer
         app.MapGet("/api/multimodal-config", (string agent) => GetMultiModalConfigHttp(agent));
         app.MapPost("/api/multimodal-config", (Func<HttpContext, Task<IResult>>)SaveMultiModalConfigHttp);
         app.MapPost("/api/image-generation", (Func<HttpContext, Task<IResult>>)GenerateImageHttp);
+        app.MapPost("/api/image-edit", (Func<HttpContext, Task<IResult>>)EditImageHttp);
         app.MapPost("/api/audio/speech", (Func<HttpContext, Task<IResult>>)TextToSpeechHttp);
         app.MapPost("/api/audio/transcriptions", (Func<HttpContext, Task<IResult>>)TranscribeAudioHttp);
         app.MapGet("/api/sound-cue-settings", (string? agent) =>
@@ -519,11 +521,17 @@ public sealed class WebServer
         app.MapPost("/api/skills/learn-validate", async (HttpContext context) =>
         {
             SkillLearnRequest? request = null;
+            var fallbackAgent = context.Request.Query.TryGetValue("agent", out var queryAgent) ? queryAgent.ToString() : null;
             try
             {
+                TrySetSkillImportRequestBodyLimit(context);
                 request = await ReadSkillLearnRequestAsync(context);
                 if (request == null || string.IsNullOrWhiteSpace(request.Agent))
-                    return Results.BadRequest("Missing agent.");
+                {
+                    if (!string.IsNullOrWhiteSpace(fallbackAgent))
+                        RecordSkillLearnStartFailure(fallbackAgent, "Missing agent.");
+                    return SkillLearnStartError("Missing agent.");
+                }
 
                 var job = await TryStartManualAgentJobAsync(
                     request.Agent,
@@ -549,7 +557,10 @@ public sealed class WebServer
             {
                 if (request != null)
                     CleanupSkillLearnRequest(request);
-                return Results.BadRequest(ex.Message);
+                var agent = request?.Agent ?? fallbackAgent;
+                if (!string.IsNullOrWhiteSpace(agent))
+                    RecordSkillLearnStartFailure(agent, ex.Message);
+                return SkillLearnStartError(ex.Message);
             }
         });
         app.MapGet("/api/skills/job/status", (string jobId) =>
@@ -1392,6 +1403,43 @@ public sealed class WebServer
         }
     }
 
+    private static void TrySetSkillImportRequestBodyLimit(HttpContext context)
+    {
+        var feature = context.Features.Get<IHttpMaxRequestBodySizeFeature>();
+        if (feature == null || feature.IsReadOnly)
+            return;
+
+        feature.MaxRequestBodySize = Math.Max(MaxChatAttachmentTotalBytes + 1024L * 1024, MaxSkillImportRequestBytes);
+    }
+
+    private IResult SkillLearnStartError(string message)
+    {
+        return Results.BadRequest(new
+        {
+            status = "failed",
+            message = string.IsNullOrWhiteSpace(message) ? "Skill learning validation failed to start." : message
+        });
+    }
+
+    private void RecordSkillLearnStartFailure(string agent, string message)
+    {
+        try
+        {
+            var safeAgent = NormalizeAgentName(agent);
+            new BackgroundEventService(_path).Record(
+                safeAgent,
+                "subagent",
+                "skill_learn_validate_start_" + DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + "_" + Guid.NewGuid().ToString("N")[..6],
+                "skill_learn_validate",
+                "failed",
+                "Skill learning validation failed before job creation: " + message,
+                "retry_manual");
+        }
+        catch
+        {
+        }
+    }
+
     private void RefreshVectorMemoryIndexesOnStartup()
     {
         if (!Directory.Exists(_path.AgentsRoot))
@@ -1593,6 +1641,81 @@ public sealed class WebServer
         {
             return Results.BadRequest(ex.Message);
         }
+    }
+
+    private async Task<IResult> EditImageHttp(HttpContext context)
+    {
+        try
+        {
+            if (!context.Request.HasFormContentType)
+                return Results.BadRequest("Expected multipart/form-data with one image file.");
+
+            var form = await context.Request.ReadFormAsync(context.RequestAborted);
+            var agent = NormalizeAgentName(form["agent"].FirstOrDefault() ?? "");
+            EnsureAgentExists(agent);
+
+            var file = form.Files.GetFile("image");
+            if (file == null || file.Length <= 0)
+                return Results.BadRequest("Missing image file.");
+
+            var extension = Path.GetExtension(file.FileName).ToLowerInvariant();
+            if (extension is not ".png" and not ".jpg" and not ".jpeg" and not ".webp")
+                return Results.BadRequest("Image edit supports png, jpg, jpeg, or webp.");
+            if (file.Length > 50L * 1024 * 1024)
+                return Results.BadRequest("Image file is too large. Maximum is 50 MB.");
+
+            var prompt = (form["prompt"].FirstOrDefault() ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(prompt))
+                return Results.BadRequest("prompt is required.");
+
+            var uploadDir = Path.Combine(_path.GetWorkspacePath(agent), "generated", "image_edit_sources");
+            Directory.CreateDirectory(uploadDir);
+            var sourcePath = Path.Combine(uploadDir, "edit_source_" + UserTimeZoneService.Now().ToString("yyyyMMdd_HHmmssfff") + "_" + Guid.NewGuid().ToString("N")[..8] + extension);
+            await using (var stream = File.Create(sourcePath))
+            {
+                await file.CopyToAsync(stream, context.RequestAborted);
+            }
+
+            var selectedProfile = FormString(form, "imageProfile") ?? FormString(form, "profile");
+            var request = new ImageGenerationRequest
+            {
+                Agent = agent,
+                ImageProfile = selectedProfile,
+                AllowProfileFallback = FormBool(form, "allowProfileFallback", string.IsNullOrWhiteSpace(selectedProfile)),
+                Prompt = prompt,
+                SourceImagePath = sourcePath,
+                Size = FormString(form, "size"),
+                Quality = FormString(form, "quality"),
+                OutputFormat = FormString(form, "outputFormat") ?? FormString(form, "output_format"),
+                Count = FormInt(form, "count", 1),
+                UseBrowserTemp = false
+            };
+
+            var results = await new MultiModalClient(_path).GenerateImageAsync(agent, request, context.RequestAborted);
+            return Results.Json(new { sourceImagePath = sourcePath, results }, JsonOptions);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or HttpRequestException or JsonException or IOException)
+        {
+            return Results.BadRequest(ex.Message);
+        }
+    }
+
+    private static string? FormString(IFormCollection form, string key)
+    {
+        var value = form[key].FirstOrDefault();
+        return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+    }
+
+    private static bool FormBool(IFormCollection form, string key, bool defaultValue)
+    {
+        var value = FormString(form, key);
+        return value == null ? defaultValue : value.Equals("true", StringComparison.OrdinalIgnoreCase) || value == "1" || value.Equals("yes", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static int FormInt(IFormCollection form, string key, int defaultValue)
+    {
+        var value = FormString(form, key);
+        return int.TryParse(value, out var parsed) ? parsed : defaultValue;
     }
 
     private async Task<IResult> TextToSpeechHttp(HttpContext context)

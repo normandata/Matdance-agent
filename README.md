@@ -18,6 +18,8 @@ Strong recommendation: read [FULL-DOC.md](FULL-DOC.md). `FULL-DOC.md` and [FULL-
 
 - `v1.1.21-preview` optimizes main conversation context compression. Automatic and manual compaction now estimate the full request budget, preserve the latest three user turns, use segmented downgrade/recovery, keep a one-shot handoff only for the compressed retry, and reuse compacted sidecar summaries on later turns.
 - `v1.1.21-preview` also hardens scheduled tasks. Agent-created tasks now require clearer schedule/timezone/content/delivery confirmation, support dedicated read-only notification sessions, expose real manual test runs for user tasks without advancing the original schedule, queue main-agent-triggered tests through `scheduled_task_do_a_test` to avoid self-competing with concurrency budget, and render scheduled-task notification cards with the full subagent Markdown output instead of truncating at internal separators.
+- `v1.1.21-preview` improves skill learning, validation, and maintenance. External skill imports now preserve concrete resource files, learn in adaptive file batches, keep validation from overwriting raw imported resources, allow normal validation to repair resources through stronger quality gates, and keep background skill organization self-healing with round-based `skill_read`, downgrade/recovery, and poison-batch skip.
+- `v1.1.21-preview` adds image editing support beside image generation. Debug Lab now has a Generate/Edit switch, the host exposes an OpenAI-compatible `/images/edits` path, and agents can call the new `image_edit` tool with one local source image plus a concise edit prompt. Main-agent calls remain asynchronous while scheduled-task/subagent calls can run synchronously by host policy.
 - Fixed in `v1.1.20-hot-fix-2`: skill organization could exceed model context limits or repeatedly fail on one bad evidence range, preventing later conversations from being organized into skills. Skill organization now uses adaptive batch downgrade/recovery, round-based `skill_read` windows, tool-call-only evidence compression, and poison-batch skip after repeated recoverable failures.
 
 ## Contents
@@ -89,7 +91,7 @@ For complete startup, entry registration, hosted Web UI, model configuration, an
 - Scheduled tasks: once, daily, repeated, windowed, and catch-up execution after restart, sleep, or interruption.
 - Browser automation: controlled Playwright Chromium with navigation, clicking, typing, screenshots, page reading, and cookie save/apply diagnostics.
 - Attachments and previews: Chat supports up to three attachments, and inline `{show_file:...}` can display images, HTML, Markdown, text, audio, and common documents.
-- Multimodal tools: host-managed asynchronous image generation, TTS asset generation, Chat/Lab audio playback, and browser Web Speech recording recognition.
+- Multimodal tools: host-managed asynchronous image generation and image editing, TTS asset generation, Chat/Lab audio playback, and browser Web Speech recording recognition.
 - Inspectable local state: sessions, memories, skills, task runs, and workspace artifacts are local files.
 - Anthropic Messages API support: Claude can use Matdance tools through native `tool_use` / `tool_result` blocks, including streaming tool argument collection.
 

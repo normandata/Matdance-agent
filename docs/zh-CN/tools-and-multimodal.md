@@ -87,6 +87,14 @@ agents/<agent>/workspace/generated/images/
 
 图像 prompt 默认应保持 1-30 个字符。只有用户明确要求复杂画面，或确实无法压缩而不丢失需求时，才允许 31-50 个字符。
 
+## 图片编辑
+
+`image_edit` 与 `image_generation` 使用同一套图像 profile，但会把一张已有本地图片和编辑提示词发送到 OpenAI 兼容的 `/images/edits` 端点。源图必须位于 agent workspace 或 `browser_temp` 内，格式为 `png`、`jpg`、`jpeg` 或 `webp`，并满足宿主侧大小限制。
+
+主 agent 调用时，图片编辑与图像生成一样是宿主级异步任务，通过同一套 `image_generation_show_process`、取消、重试和完成通知流程追踪。定时任务 subagent 可以按宿主策略同步执行图片编辑，让任务在同一次运行里拿到最终文件或失败详情。
+
+Debug Lab 也接入了这条路径：图像卡片提供生成/编辑切换，编辑模式允许上传一张源图并输入编辑提示词，输出仍写入常规 generated image 工作区。
+
 聊天附件里的图片走模型主 LLM 请求，不走 `image_generation`。Matdance 会先给未知模型一次携带图片 payload 的机会；如果上游明确拒绝图片/多模态输入，会立刻改为不带图片重试，并把该 provider/model 记录为 text-only。后续同模型默认只传文件名、路径和元数据，避免每次都撞一次多模态错误。
 
 如果图片请求失败原因不明确，Matdance 会先不带图片快速重试；只有文本请求也失败时才进入普通 LLM retry。连续出现“带图失败、去图成功”的情况后，系统会把该 provider/model 暂时视为不支持视觉输入。这个判断是运行时能力缓存，不是 agent 记忆。

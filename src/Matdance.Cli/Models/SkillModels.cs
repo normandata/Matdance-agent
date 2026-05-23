@@ -35,6 +35,7 @@ public class SkillCreateRequest
     public string Description { get; set; } = string.Empty;
     public List<string>? Tags { get; set; }
     public string Content { get; set; } = string.Empty;
+    public List<SkillResourceFile>? ResourceFiles { get; set; }
 }
 
 public class SkillEditRequest
@@ -43,6 +44,16 @@ public class SkillEditRequest
     public string? Name { get; set; }
     public string? Description { get; set; }
     public List<string>? Tags { get; set; }
+    public string? Content { get; set; }
+    public List<SkillResourceFile>? ResourceFiles { get; set; }
+}
+
+public class SkillResourceFile
+{
+    [JsonPropertyName("path")]
+    public string Path { get; set; } = string.Empty;
+
+    [JsonPropertyName("content")]
     public string? Content { get; set; }
 }
 

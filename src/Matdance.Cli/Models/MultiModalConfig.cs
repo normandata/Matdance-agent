@@ -325,6 +325,7 @@ public sealed class ImageGenerationRequest
     public int Count { get; set; } = 1;
     public string? OutputPath { get; set; }
     public bool UseBrowserTemp { get; set; }
+    public string? SourceImagePath { get; set; }
 }
 
 public sealed class TextToSpeechRequest
@@ -429,6 +430,8 @@ public sealed class ImageGenerationJob
     public string? OutputPath { get; set; }
     public bool UseBrowserTemp { get; set; }
     public bool AllowProfileFallback { get; set; } = true;
+    public string Operation { get; set; } = "generation";
+    public string? SourceImagePath { get; set; }
     public bool FallbackOccurred { get; set; }
     public string? Error { get; set; }
     public string? ErrorType { get; set; }

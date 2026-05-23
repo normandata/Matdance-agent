@@ -12,6 +12,14 @@ public sealed class MultiModalClient
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(3) };
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly Regex UrlRegex = new(@"https?://[^\s)'""<>]+", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private const long MaxImageEditSourceBytes = 50L * 1024 * 1024;
+    private static readonly HashSet<string> ImageEditSourceExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".webp"
+    };
     private readonly PathService _path;
     private readonly MultiModalConfigService _config;
 
@@ -26,7 +34,7 @@ public sealed class MultiModalClient
         var outcome = await GenerateImageDetailedAsync(agent, request, ct);
         if (!outcome.Success)
         {
-            throw new InvalidOperationException(outcome.Error ?? "image_generation failed.");
+            throw new InvalidOperationException(outcome.Error ?? NormalizeImageOperation(request.SourceImagePath) + " failed.");
         }
 
         return outcome.Results;
@@ -36,13 +44,14 @@ public sealed class MultiModalClient
     {
         var effective = _config.GetEffective(agent);
         if (string.IsNullOrWhiteSpace(request.Prompt)) throw new InvalidOperationException("prompt is required.");
+        var operation = NormalizeImageOperation(request.SourceImagePath);
 
         var candidates = ImageCandidates(effective, request.ImageProfile, request.AllowProfileFallback).ToList();
         if (candidates.Count == 0)
         {
             throw string.IsNullOrWhiteSpace(request.ImageProfile)
-                ? new InvalidOperationException("image_generation is disabled in multimodal settings.")
-                : new InvalidOperationException($"image_generation profile '{request.ImageProfile}' is disabled or not configured.");
+                ? new InvalidOperationException(operation + " is disabled in multimodal settings.")
+                : new InvalidOperationException($"{operation} profile '{request.ImageProfile}' is disabled or not configured.");
         }
 
         Exception? lastError = null;
@@ -62,7 +71,7 @@ public sealed class MultiModalClient
             attempts.Add(attempt);
             try
             {
-                RequireEndpoint(image.BaseUrl, image.ApiKey, $"image_generation profile '{image.Name}'");
+                RequireEndpoint(image.BaseUrl, image.ApiKey, $"{operation} profile '{image.Name}'");
                 var results = (await GenerateImageWithProfileAsync(agent, image, request, ct)).ToList();
                 var fallbackOccurred = attempts.Any(item => string.Equals(item.Status, "failed", StringComparison.OrdinalIgnoreCase));
                 foreach (var result in results)
@@ -83,7 +92,7 @@ public sealed class MultiModalClient
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 attempt.Status = "canceled";
-                attempt.Error = "image_generation was canceled.";
+                attempt.Error = operation + " was canceled.";
                 attempt.ErrorType = nameof(OperationCanceledException);
                 attempt.FinishedAt = UserTimeZoneService.Now();
                 throw;
@@ -101,7 +110,7 @@ public sealed class MultiModalClient
         return new ImageGenerationOutcome
         {
             Success = false,
-            Error = lastError?.Message ?? "image_generation failed before selecting a profile.",
+            Error = lastError?.Message ?? operation + " failed before selecting a profile.",
             ErrorType = lastError?.GetType().Name,
             ErrorCategory = ClassifyImageGenerationError(lastError),
             FallbackOccurred = attempts.Count > 1 && attempts.Any(item => string.Equals(item.Status, "failed", StringComparison.OrdinalIgnoreCase)),
@@ -113,6 +122,8 @@ public sealed class MultiModalClient
     {
         var count = Math.Clamp(request.Count <= 0 ? 1 : request.Count, 1, 4);
         var outputFormat = NormalizeFormat(request.OutputFormat, image.OutputFormat, "png");
+        if (!string.IsNullOrWhiteSpace(request.SourceImagePath))
+            return await EditImageWithProfileAsync(agent, image, request, outputFormat, count, ct);
 
         var payload = new Dictionary<string, object?>
         {
@@ -162,6 +173,46 @@ public sealed class MultiModalClient
         }
 
         throw new InvalidOperationException("image_generation response did not contain a data array or async task_id.");
+    }
+
+    private async Task<IReadOnlyList<GeneratedFileResult>> EditImageWithProfileAsync(string agent, EffectiveImageGenerationConfig image, ImageGenerationRequest request, string outputFormat, int count, CancellationToken ct)
+    {
+        var sourcePath = ResolveImageEditSourcePath(agent, request.SourceImagePath);
+        var payload = new Dictionary<string, object?>
+        {
+            ["model"] = image.Model,
+            ["prompt"] = request.Prompt,
+            ["n"] = count
+        };
+
+        var size = FirstValue(request.Size, image.Size);
+        if (!string.IsNullOrWhiteSpace(size)) payload["size"] = size;
+
+        var quality = FirstValue(request.Quality, image.Quality);
+        if (!string.IsNullOrWhiteSpace(quality) && !quality.Equals("auto", StringComparison.OrdinalIgnoreCase))
+        {
+            payload["quality"] = quality;
+        }
+
+        if (!outputFormat.Equals("png", StringComparison.OrdinalIgnoreCase))
+        {
+            payload["output_format"] = outputFormat;
+        }
+
+        var endpoint = Endpoint(image.BaseUrl, "images/edits");
+        var editResponse = await SendImageEditRequestAsync(endpoint, image.ApiKey, payload, sourcePath, ct);
+        if (!editResponse.Success)
+        {
+            throw new HttpRequestException($"image_edit failed: {editResponse.StatusCode} - {Trim(editResponse.Body, 2000)}");
+        }
+
+        using var document = JsonDocument.Parse(editResponse.Body);
+        if (document.RootElement.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Array)
+        {
+            return await SaveOpenAiImageDataAsync(agent, request, data, outputFormat, image, ct);
+        }
+
+        throw new InvalidOperationException("image_edit response did not contain a data array.");
     }
 
     private async Task<IReadOnlyList<GeneratedFileResult>> SaveOpenAiImageDataAsync(
@@ -799,6 +850,33 @@ public sealed class MultiModalClient
         }, ct);
     }
 
+    private static async Task<(bool Success, int StatusCode, string Body)> SendImageEditRequestAsync(
+        string endpoint,
+        string apiKey,
+        Dictionary<string, object?> payload,
+        string sourceImagePath,
+        CancellationToken ct)
+    {
+        return await SendStringRequestWithReconnectAsync(() =>
+        {
+            var request = new HttpRequestMessage(HttpMethod.Post, endpoint);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+            var form = new MultipartFormDataContent();
+            foreach (var item in payload)
+            {
+                if (item.Value == null) continue;
+                form.Add(new StringContent(Convert.ToString(item.Value, System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty, Encoding.UTF8), item.Key);
+            }
+
+            var bytes = File.ReadAllBytes(sourceImagePath);
+            var imageContent = new ByteArrayContent(bytes);
+            imageContent.Headers.ContentType = new MediaTypeHeaderValue(GetImageEditContentType(sourceImagePath));
+            form.Add(imageContent, "image", Path.GetFileName(sourceImagePath));
+            request.Content = form;
+            return request;
+        }, ct);
+    }
+
     private static async Task<(bool Success, int StatusCode, string Body)> SendJsonRequestAsync(
         string endpoint,
         string apiKey,
@@ -1020,6 +1098,74 @@ public sealed class MultiModalClient
         model.Id.Equals(requested, StringComparison.OrdinalIgnoreCase)
         || model.Name.Equals(requested, StringComparison.OrdinalIgnoreCase)
         || model.Model.Equals(requested, StringComparison.OrdinalIgnoreCase);
+
+    private string ResolveImageEditSourcePath(string agent, string? sourcePath)
+    {
+        if (string.IsNullOrWhiteSpace(sourcePath))
+            throw new InvalidOperationException("source_image_path is required for image_edit.");
+
+        var normalized = PathSafety.NormalizeSeparators(sourcePath.Trim());
+        if (PathSafety.ContainsParentTraversal(normalized))
+            throw new InvalidOperationException("source_image_path cannot contain path traversal.");
+
+        var workspace = Path.GetFullPath(_path.GetWorkspacePath(agent));
+        var browserTemp = Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), "browser_temp"));
+        var current = Path.GetFullPath(Directory.GetCurrentDirectory());
+
+        string candidate;
+        if (Path.IsPathRooted(normalized))
+        {
+            candidate = Path.GetFullPath(normalized);
+        }
+        else if (normalized.Equals("browser_temp", PathSafety.PathComparison) || normalized.StartsWith("browser_temp" + Path.DirectorySeparatorChar, PathSafety.PathComparison))
+        {
+            var relative = normalized.Equals("browser_temp", PathSafety.PathComparison)
+                ? string.Empty
+                : normalized[("browser_temp" + Path.DirectorySeparatorChar).Length..];
+            candidate = Path.GetFullPath(Path.Combine(browserTemp, relative));
+        }
+        else if (normalized.Equals("workspace", PathSafety.PathComparison) || normalized.StartsWith("workspace" + Path.DirectorySeparatorChar, PathSafety.PathComparison))
+        {
+            var relative = normalized.Equals("workspace", PathSafety.PathComparison)
+                ? string.Empty
+                : normalized[("workspace" + Path.DirectorySeparatorChar).Length..];
+            candidate = Path.GetFullPath(Path.Combine(workspace, relative));
+        }
+        else
+        {
+            candidate = Path.GetFullPath(Path.Combine(workspace, normalized));
+        }
+
+        if (!IsUnderRoot(candidate, workspace) && !IsUnderRoot(candidate, browserTemp) && !IsUnderRoot(candidate, current))
+            throw new InvalidOperationException("source_image_path must stay inside the agent workspace or browser_temp.");
+        if (!File.Exists(candidate))
+            throw new InvalidOperationException("source_image_path was not found.");
+
+        var extension = Path.GetExtension(candidate);
+        if (!ImageEditSourceExtensions.Contains(extension))
+            throw new InvalidOperationException("source_image_path must be a png, jpg, jpeg, or webp image.");
+
+        var info = new FileInfo(candidate);
+        if (info.Length <= 0)
+            throw new InvalidOperationException("source_image_path is empty.");
+        if (info.Length > MaxImageEditSourceBytes)
+            throw new InvalidOperationException($"source_image_path is too large: {info.Length} bytes > {MaxImageEditSourceBytes}.");
+
+        return candidate;
+    }
+
+    private static string NormalizeImageOperation(string? sourceImagePath)
+        => string.IsNullOrWhiteSpace(sourceImagePath) ? "image_generation" : "image_edit";
+
+    private static string GetImageEditContentType(string path)
+    {
+        return Path.GetExtension(path).ToLowerInvariant() switch
+        {
+            ".jpg" or ".jpeg" => "image/jpeg",
+            ".webp" => "image/webp",
+            _ => "image/png"
+        };
+    }
 
     private static IEnumerable<EffectiveTextToSpeechConfig> TtsCandidates(
         EffectiveMultiModalConfig effective,
